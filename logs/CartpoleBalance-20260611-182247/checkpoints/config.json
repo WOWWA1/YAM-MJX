@@ -1,0 +1,34 @@
+{
+    "action_repeat": 1,
+    "ctrl_dt": 0.01,
+    "episode_length": 1000,
+    "impl": "warp",
+    "naconmax": 0,
+    "njmax": 2,
+    "sim_dt": 0.01,
+    "vision": false,
+    "vision_config": {
+        "cam_active": [
+            true,
+            false
+        ],
+        "cam_res": [
+            64,
+            64
+        ],
+        "enabled_geom_groups": [
+            0,
+            1,
+            2
+        ],
+        "nworld": 1024,
+        "render_depth": [
+            false
+        ],
+        "render_rgb": [
+            true
+        ],
+        "use_shadows": false,
+        "use_textures": false
+    }
+}
