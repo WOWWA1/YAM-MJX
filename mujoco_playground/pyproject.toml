@@ -26,6 +26,8 @@ dependencies = [
     "brax>=0.14.2",
     "etils",
     "flax",
+    "h5py",
+    "imageio",
     "jax",
     "lxml",
     "mediapy",

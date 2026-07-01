@@ -18,16 +18,9 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from yam_assets import YAM_DIR
+from yam_assets import require_yam_file
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-YAM_DIR = (
-    REPO_ROOT
-    / "mujoco_playground"
-    / "external_deps"
-    / "mujoco_menagerie"
-    / "i2rt_yam"
-)
-YAM_XML = YAM_DIR / "yam.xml"
 
 DEFAULT_Q_CAPTURE = np.array(
     [
@@ -148,8 +141,7 @@ def save_h5(
     cube_pos: np.ndarray,
     fovy: float,
 ) -> None:
-    if not YAM_XML.exists():
-        raise FileNotFoundError(f"Could not find YAM XML at {YAM_XML}")
+    require_yam_file("yam.xml")
 
     scene_xml = _make_scene_xml(camera_pos, camera_target, cube_pos, fovy)
     with tempfile.NamedTemporaryFile("w", suffix=".xml", dir=YAM_DIR, delete=False) as tmp:

@@ -8,18 +8,50 @@ TiPToP's offline H5 path and monkeypatches YAM planning settings in memory.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
-
-import torch
-
-
-TIPTOP_PACKAGE_DIR = Path(
-    os.environ.get("TIPTOP_PACKAGE_DIR", "/home/drosakis/yam-tamp/tiptop/tiptop/tiptop")
-)
+import sys
 
 
-def _rz(theta: float, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+TIPTOP_PACKAGE_DIR = os.environ.get("TIPTOP_PACKAGE_DIR")
+
+
+def _prepare_tiptop_package_dir() -> None:
+    if not TIPTOP_PACKAGE_DIR:
+        return
+
+    tiptop_package_dir = Path(TIPTOP_PACKAGE_DIR)
+    if not tiptop_package_dir.exists():
+        raise FileNotFoundError(
+            f"TIPTOP_PACKAGE_DIR points to a missing path: {tiptop_package_dir}"
+        )
+
+    if (tiptop_package_dir / "__init__.py").exists():
+        sys.path.insert(0, str(tiptop_package_dir.parent))
+    else:
+        sys.path.insert(0, str(tiptop_package_dir))
+    os.chdir(tiptop_package_dir)
+
+
+def _check_tiptop_dependencies() -> None:
+    missing = [
+        name
+        for name in ("torch", "tiptop", "cutamp")
+        if importlib.util.find_spec(name) is None
+    ]
+    if missing:
+        raise ModuleNotFoundError(
+            "Missing TiPToP planner dependencies: "
+            + ", ".join(missing)
+            + ". Install TiPToP/cuTAMP in this venv, or set TIPTOP_PACKAGE_DIR "
+            "to a local TiPToP checkout that Python can import."
+        )
+
+
+def _rz(theta, *, device, dtype):
+    import torch
+
     c = torch.cos(torch.tensor(theta, device=device, dtype=dtype))
     s = torch.sin(torch.tensor(theta, device=device, dtype=dtype))
     z = torch.zeros((), device=device, dtype=dtype)
@@ -33,8 +65,10 @@ def _rz(theta: float, *, device: torch.device, dtype: torch.dtype) -> torch.Tens
     )
 
 
-def _make_tool_from_ee(mode: str, ref: torch.Tensor) -> torch.Tensor:
+def _make_tool_from_ee(mode: str, ref):
     """Return a candidate transform from grasp/tool frame to cuRobo EE frame."""
+    import torch
+
     device = ref.device
     dtype = ref.dtype
     current = ref.clone()
@@ -362,8 +396,11 @@ def main() -> None:
     parser.add_argument("--joint-space-fallback", action="store_true")
     args = parser.parse_args()
 
-    if TIPTOP_PACKAGE_DIR.exists():
-        os.chdir(TIPTOP_PACKAGE_DIR)
+    _prepare_tiptop_package_dir()
+    try:
+        _check_tiptop_dependencies()
+    except ModuleNotFoundError as exc:
+        raise SystemExit(str(exc)) from None
 
     _install_yam_debug_patches(
         tool_frame_mode=args.tool_frame_mode,
