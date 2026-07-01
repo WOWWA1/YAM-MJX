@@ -23,6 +23,12 @@ from save_tiptop_h5_from_yam import YAM_DIR, _make_scene_xml, _parse_vec
 DEFAULT_CAMERA_POS = np.array([0.65, -0.30, 0.42], dtype=np.float64)
 DEFAULT_CAMERA_TARGET = np.array([0.45, 0.0, 0.025], dtype=np.float64)
 DEFAULT_CUBE_POS = np.array([0.45, 0.0, 0.025], dtype=np.float64)
+YAM_CUROBO_TO_MUJOCO_Q_SIGNS = np.array([1.0, 1.0, 1.0, 1.0, 1.0, -1.0], dtype=np.float64)
+
+
+def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64)
+    return q * YAM_CUROBO_TO_MUJOCO_Q_SIGNS if convert else q
 
 
 def _latest_plan() -> Path:
@@ -147,8 +153,9 @@ def _play_plan(
     close_width: float,
     speed: float,
     teleport: bool,
+    convert_curobo_to_mujoco_q: bool,
 ) -> None:
-    q_init = np.asarray(plan.get("q_init"), dtype=np.float64)
+    q_init = _curobo_q_to_mujoco(plan.get("q_init"), convert_curobo_to_mujoco_q)
     if q_init.shape != (6,):
         raise ValueError("tiptop_plan.json must contain q_init with 6 values")
 
@@ -166,7 +173,12 @@ def _play_plan(
             positions = step.get("positions", [])
             print(f"Playing trajectory: {step.get('label', '<unnamed>')} ({len(positions)} waypoints)")
             for q in positions:
-                _set_arm(model, data, np.asarray(q, dtype=np.float64), teleport=teleport)
+                _set_arm(
+                    model,
+                    data,
+                    _curobo_q_to_mujoco(q, convert_curobo_to_mujoco_q),
+                    teleport=teleport,
+                )
                 if not _sync_for(viewer, model, data, dt, speed, teleport):
                     return
         elif step_type == "gripper":
@@ -191,6 +203,7 @@ def main() -> None:
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--open-width", type=float, default=0.03)
     parser.add_argument("--close-width", type=float, default=0.0)
+    parser.add_argument("--no-curobo-to-mujoco-q-conversion", action="store_true")
     parser.add_argument("--fovy", type=float, default=24.0)
     parser.add_argument(
         "--camera-pos",
@@ -220,6 +233,10 @@ def main() -> None:
 
     print(f"Loaded plan: {plan_path}")
     print(f"Plan steps: {[step.get('type') for step in plan.get('steps', [])]}")
+    print(
+        "YAM replay q convention: "
+        f"curobo_to_mujoco_q_conversion={'false' if args.no_curobo_to_mujoco_q_conversion else YAM_CUROBO_TO_MUJOCO_Q_SIGNS.tolist()}"
+    )
     print("Viewer controls: press R to replay, close the viewer window to exit.")
 
     replay_requested = True
@@ -244,6 +261,7 @@ def main() -> None:
                     close_width=args.close_width,
                     speed=args.speed,
                     teleport=teleport,
+                    convert_curobo_to_mujoco_q=not args.no_curobo_to_mujoco_q_conversion,
                 )
             viewer.sync()
             time.sleep(0.02)

@@ -15,6 +15,25 @@ import sys
 
 
 TIPTOP_PACKAGE_DIR = os.environ.get("TIPTOP_PACKAGE_DIR")
+YAM_MUJOCO_TO_CUROBO_Q_SIGNS = (1.0, 1.0, 1.0, 1.0, 1.0, -1.0)
+
+
+def _mujoco_q_to_curobo(q):
+    """Convert simulator joint vectors to the YAM cuRobo/URDF convention."""
+    import numpy as np
+
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch is available in normal runs.
+        torch = None
+
+    if torch is not None and torch.is_tensor(q):
+        signs = torch.tensor(YAM_MUJOCO_TO_CUROBO_Q_SIGNS, device=q.device, dtype=q.dtype)
+        return q * signs
+
+    arr = np.asarray(q)
+    signs = np.asarray(YAM_MUJOCO_TO_CUROBO_Q_SIGNS, dtype=arr.dtype)
+    return arr * signs
 
 
 def _prepare_tiptop_package_dir() -> None:
@@ -77,6 +96,76 @@ def _make_tool_from_ee(mode: str, ref):
     mujoco_site[:3, :3] = _rz(-torch.pi / 2, device=device, dtype=dtype)
     mujoco_site[:3, 3] = torch.tensor([0.0, 0.0, 0.1347], device=device, dtype=dtype)
 
+    measured_grasp_site = torch.eye(4, device=device, dtype=dtype)
+    measured_grasp_site[:3, :3] = torch.tensor(
+        [
+            [0.999811, 0.019455, 0.000001],
+            [0.019455, -0.999811, 0.000002],
+            [0.000001, -0.000002, -1.0],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    measured_grasp_site[:3, 3] = torch.tensor(
+        [-0.00701567, 0.00414988, -0.13591795],
+        device=device,
+        dtype=dtype,
+    )
+    measured_grasp_site_ee_above = measured_grasp_site.clone()
+    measured_grasp_site_ee_above[:3, 3] = torch.tensor(
+        [-0.00701567, 0.00414988, 0.13591795],
+        device=device,
+        dtype=dtype,
+    )
+    measured_grasp_site_ee_above_z_up = torch.eye(4, device=device, dtype=dtype)
+    measured_grasp_site_ee_above_z_up[:3, 3] = torch.tensor(
+        [-0.00701567, 0.00414988, 0.13591795],
+        device=device,
+        dtype=dtype,
+    )
+    measured_grasp_site_ee_above_z_up_yaw_pi = torch.eye(4, device=device, dtype=dtype)
+    measured_grasp_site_ee_above_z_up_yaw_pi[:3, :3] = _rz(torch.pi, device=device, dtype=dtype)
+    measured_grasp_site_ee_above_z_up_yaw_pi[:3, 3] = torch.tensor(
+        [-0.00701567, 0.00414988, 0.13591795],
+        device=device,
+        dtype=dtype,
+    )
+
+    # Canonical YAM top-down TiPToP grasp frames. These preserve cuTAMP's
+    # 4-DOF cuboid convention where world_from_grasp has +Z upward and only yaw
+    # changes. The translations are derived from the measured MuJoCo
+    # grasp_site<->cuRobo ee_link relation so the physical grasp_site origin
+    # lands on the virtual TiPToP grasp origin while the ee_link stays above it.
+    canonical_topdown_yaw_0 = torch.eye(4, device=device, dtype=dtype)
+    canonical_topdown_yaw_0[:3, 3] = torch.tensor(
+        [-0.00654240, -0.00370353, 0.13415721],
+        device=device,
+        dtype=dtype,
+    )
+    canonical_topdown_yaw_pi = torch.eye(4, device=device, dtype=dtype)
+    canonical_topdown_yaw_pi[:3, :3] = _rz(torch.pi, device=device, dtype=dtype)
+    canonical_topdown_yaw_pi[:3, 3] = torch.tensor(
+        [0.00654240, 0.00370353, 0.13415721],
+        device=device,
+        dtype=dtype,
+    )
+
+    mujoco_grasp_site_calibrated = torch.eye(4, device=device, dtype=dtype)
+    mujoco_grasp_site_calibrated[:3, :3] = torch.tensor(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    mujoco_grasp_site_calibrated[:3, 3] = torch.tensor(
+        [-0.00654240, 0.00370353, -0.13415721],
+        device=device,
+        dtype=dtype,
+    )
+
     if mode == "current":
         return current
     if mode == "current-inverse":
@@ -85,6 +174,20 @@ def _make_tool_from_ee(mode: str, ref):
         return mujoco_site
     if mode == "mujoco-site-inverse":
         return torch.linalg.inv(mujoco_site)
+    if mode == "measured-grasp-site":
+        return measured_grasp_site
+    if mode == "measured-grasp-site-ee-above":
+        return measured_grasp_site_ee_above
+    if mode == "measured-grasp-site-ee-above-z-up":
+        return measured_grasp_site_ee_above_z_up
+    if mode == "measured-grasp-site-ee-above-z-up-yaw-pi":
+        return measured_grasp_site_ee_above_z_up_yaw_pi
+    if mode == "canonical-topdown-yaw-0":
+        return canonical_topdown_yaw_0
+    if mode == "canonical-topdown-yaw-pi":
+        return canonical_topdown_yaw_pi
+    if mode == "mujoco-grasp-site-calibrated":
+        return mujoco_grasp_site_calibrated
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
@@ -163,6 +266,25 @@ def _install_yam_debug_patches(tool_frame_mode: str, m2t2_grasps: bool | None) -
             tiptop_h5.run_planning = run_planning_debug
 
 
+def _install_yam_q_conversion_patch() -> None:
+    from dataclasses import replace
+
+    import tiptop.tiptop_h5 as tiptop_h5
+
+    original_load_h5_observation = tiptop_h5.load_h5_observation
+
+    def load_h5_observation_yam_mujoco_q(h5_path):
+        observation = original_load_h5_observation(h5_path)
+        q_init = _mujoco_q_to_curobo(observation.q_init).astype(observation.q_init.dtype, copy=False)
+        print(
+            "YAM sim q convention: converted MuJoCo q_init to cuRobo q_init "
+            f"with signs={YAM_MUJOCO_TO_CUROBO_Q_SIGNS}"
+        )
+        return replace(observation, q_init=q_init)
+
+    tiptop_h5.load_h5_observation = load_h5_observation_yam_mujoco_q
+
+
 def _install_constraint_debug() -> None:
     import cutamp.constraint_checker as constraint_checker_mod
 
@@ -210,13 +332,102 @@ def _install_constraint_debug() -> None:
     constraint_checker_mod.ConstraintChecker.get_mask = get_mask_debug
 
 
-def _install_yam_sim_bootstrap(rot_tol: float, joint_space_fallback: bool) -> None:
+def _install_pose_debug(
+    relax_approach_orientation: bool = False,
+    ignore_pick_target_collision: bool = False,
+) -> None:
+    """Log final grasp and approach poses tried by cuRobo."""
+    import torch
+    import cutamp.motion_solver as motion_solver
+    from curobo.rollout.cost.pose_cost import PoseCostMetric
+    from curobo.types.math import Pose
+
+    def pose_summary(mat):
+        arr = mat.detach().cpu()
+        xyz = arr[:3, 3].numpy().tolist()
+        x_axis = arr[:3, 0].numpy().tolist()
+        y_axis = arr[:3, 1].numpy().tolist()
+        z_axis = arr[:3, 2].numpy().tolist()
+        return {
+            "xyz": [round(float(v), 6) for v in xyz],
+            "x_axis": [round(float(v), 6) for v in x_axis],
+            "y_axis": [round(float(v), 6) for v in y_axis],
+            "z_axis": [round(float(v), 6) for v in z_axis],
+        }
+
+    def try_approach_offsets_debug(
+        *,
+        motion_gen,
+        start_js,
+        world_from_ee,
+        approach_offsets,
+        plan_config,
+        op_name,
+        stage_name,
+    ):
+        print(f"POSE_DEBUG {stage_name} {op_name} final_ee={pose_summary(world_from_ee)}")
+        if ignore_pick_target_collision and stage_name == "Pick approach" and op_name.startswith("Pick("):
+            target_obj = op_name.split("(", 1)[1].split(",", 1)[0].strip()
+            motion_gen.world_coll_checker.enable_obstacle(enable=False, name=target_obj)
+            print(f"POSE_DEBUG {stage_name} {op_name} disabled_target_obstacle={target_obj}")
+
+        last_result = None
+        world_from_approaches = world_from_ee @ approach_offsets
+        attempt_plan_config = plan_config
+        if relax_approach_orientation and "approach" in stage_name.lower():
+            attempt_plan_config = plan_config.clone()
+            attempt_plan_config.pose_cost_metric = PoseCostMetric.create_grasp_approach_metric(
+                offset_position=0.06,
+                linear_axis=2,
+                tstep_fraction=0.8,
+                project_to_goal_frame=True,
+                tensor_args=motion_gen.tensor_args,
+            )
+            print(f"POSE_DEBUG {stage_name} {op_name} relax_approach_orientation=True")
+
+        for app_idx, world_from_approach in enumerate(world_from_approaches):
+            offset_xyz = approach_offsets[app_idx, :3, 3].detach().cpu().numpy().tolist()
+            result = motion_gen.plan_single(
+                start_js,
+                Pose.from_matrix(world_from_approach),
+                attempt_plan_config,
+            )
+            last_result = result
+
+            success = motion_solver._is_success(result)
+            print(
+                f"POSE_DEBUG {stage_name} {op_name} "
+                f"attempt={app_idx + 1}/{len(world_from_approaches)} "
+                f"offset={[round(float(v), 6) for v in offset_xyz]} "
+                f"approach={pose_summary(world_from_approach)} "
+                f"success={success} status={result.status}"
+            )
+            if success:
+                return result
+
+        status = None if last_result is None else last_result.status
+        raise motion_solver.MotionPlanningError(
+            f"Failed {stage_name} for {op_name}. "
+            f"Tried {len(approach_offsets)} offsets. Last status: {status}"
+        )
+
+    motion_solver._try_approach_offsets = try_approach_offsets_debug
+
+
+def _install_yam_sim_bootstrap(
+    rot_tol: float,
+    joint_space_fallback: bool,
+    ignore_robot_world_collision: bool,
+    drop_static_world: bool,
+) -> None:
     """Patch tiptop_h5.run_planning for simulator bootstrap runs."""
     import time
 
     import torch
     import tiptop.tiptop_h5 as tiptop_h5
+    from curobo.geom.types import Cuboid
     from cutamp.algorithm import run_cutamp, setup_cutamp
+    from cutamp.envs import TAMPEnvironment
     from cutamp.constraint_checker import ConstraintChecker
     from cutamp.cost_function import CostFunction
     from cutamp.cost_reduction import CostReducer
@@ -237,6 +448,9 @@ def _install_yam_sim_bootstrap(rot_tol: float, joint_space_fallback: bool) -> No
 
     def _constraint_tolerances(all_surfaces):
         constraint_to_tol = default_constraint_to_tol.copy()
+        constraint_to_tol["Collision"] = constraint_to_tol["Collision"].copy()
+        if ignore_robot_world_collision:
+            constraint_to_tol["Collision"]["robot_to_world"] = 1e6
         constraint_to_tol["KinematicConstraint"] = constraint_to_tol["KinematicConstraint"].copy()
         constraint_to_tol["KinematicConstraint"]["rot_err"] = rot_tol
         constraint_to_mult = default_constraint_to_mult.copy()
@@ -246,7 +460,35 @@ def _install_yam_sim_bootstrap(rot_tol: float, joint_space_fallback: bool) -> No
             constraint_to_mult["StablePlacement"][f"{surface.name}_support"] = 1.0
         return constraint_to_tol, constraint_to_mult
 
+    def _without_static_world(env):
+        if not drop_static_world:
+            return env
+        if (
+            len(env.statics) == 1
+            and getattr(env.statics[0], "name", None) == "debug_far_static"
+        ):
+            return env
+        type_to_objects = {
+            obj_type: list(objects)
+            for obj_type, objects in env.type_to_objects.items()
+            if obj_type != "Surface"
+        }
+        dummy_static = Cuboid(
+            name="debug_far_static",
+            dims=[0.001, 0.001, 0.001],
+            pose=[100.0, 100.0, 100.0, 1.0, 0.0, 0.0, 0.0],
+            color=[128, 128, 128],
+        )
+        return TAMPEnvironment(
+            name=f"{env.name}_no_static_world",
+            movables=list(env.movables),
+            statics=[dummy_static],
+            type_to_objects=type_to_objects,
+            goal_state=env.goal_state,
+        )
+
     def _joint_space_fallback(env, config, q_init, ik_solver, all_surfaces):
+        env = _without_static_world(env)
         fallback_config = config.__class__(
             **{
                 **config.__dict__,
@@ -331,6 +573,7 @@ def _install_yam_sim_bootstrap(rot_tol: float, joint_space_fallback: bool) -> No
         ]
 
     def run_planning_yam_sim(env, config, q_init, ik_solver, grasps, motion_gen, all_surfaces, experiment_dir=None):
+        env = _without_static_world(env)
         sim_config = config.__class__(
             **{
                 **config.__dict__,
@@ -385,8 +628,20 @@ def main() -> None:
     parser.add_argument("--max-planning-time", type=float, default=60.0)
     parser.add_argument(
         "--tool-frame-mode",
-        choices=("current", "current-inverse", "mujoco-site", "mujoco-site-inverse"),
-        default="current",
+        choices=(
+            "current",
+            "current-inverse",
+            "mujoco-site",
+            "mujoco-site-inverse",
+            "measured-grasp-site",
+            "measured-grasp-site-ee-above",
+            "measured-grasp-site-ee-above-z-up",
+            "measured-grasp-site-ee-above-z-up-yaw-pi",
+            "canonical-topdown-yaw-0",
+            "canonical-topdown-yaw-pi",
+            "mujoco-grasp-site-calibrated",
+        ),
+        default="canonical-topdown-yaw-pi",
     )
     parser.add_argument("--disable-m2t2-grasps", action="store_true")
     parser.add_argument("--rr-spawn", action="store_true")
@@ -394,6 +649,12 @@ def main() -> None:
     parser.add_argument("--yam-sim-bootstrap", action="store_true")
     parser.add_argument("--yam-rot-tol", type=float, default=0.8)
     parser.add_argument("--joint-space-fallback", action="store_true")
+    parser.add_argument("--ignore-robot-world-collision", action="store_true")
+    parser.add_argument("--drop-static-world", action="store_true")
+    parser.add_argument("--pose-debug", action="store_true")
+    parser.add_argument("--relax-approach-orientation", action="store_true")
+    parser.add_argument("--ignore-pick-target-collision", action="store_true")
+    parser.add_argument("--no-yam-q-sign-conversion", action="store_true")
     args = parser.parse_args()
 
     _prepare_tiptop_package_dir()
@@ -406,12 +667,21 @@ def main() -> None:
         tool_frame_mode=args.tool_frame_mode,
         m2t2_grasps=False if args.disable_m2t2_grasps else None,
     )
+    if not args.no_yam_q_sign_conversion:
+        _install_yam_q_conversion_patch()
     if args.constraint_debug:
         _install_constraint_debug()
+    if args.pose_debug or args.ignore_pick_target_collision:
+        _install_pose_debug(
+            relax_approach_orientation=args.relax_approach_orientation,
+            ignore_pick_target_collision=args.ignore_pick_target_collision,
+        )
     if args.yam_sim_bootstrap:
         _install_yam_sim_bootstrap(
             rot_tol=args.yam_rot_tol,
             joint_space_fallback=args.joint_space_fallback,
+            ignore_robot_world_collision=args.ignore_robot_world_collision,
+            drop_static_world=args.drop_static_world,
         )
 
     from tiptop.tiptop_h5 import run_tiptop_h5
@@ -419,7 +689,8 @@ def main() -> None:
     print(
         "YAM debug run: "
         f"tool_frame_mode={args.tool_frame_mode}, "
-        f"m2t2_grasps={'false' if args.disable_m2t2_grasps else 'tiptop-default'}"
+        f"m2t2_grasps={'false' if args.disable_m2t2_grasps else 'tiptop-default'}, "
+        f"q_sign_conversion={'false' if args.no_yam_q_sign_conversion else YAM_MUJOCO_TO_CUROBO_Q_SIGNS}"
     )
     run_tiptop_h5(
         h5_path=args.h5_path,
