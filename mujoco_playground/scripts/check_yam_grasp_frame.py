@@ -85,6 +85,24 @@ def _candidate_tool_from_ee() -> dict[str, np.ndarray]:
         "canonical-yaw-0": _mat_from_rz_t(0.0, yaw0_t),
         "canonical-yaw-pi": _mat_from_rz_t(np.pi, yawpi_t),
         "physical-mujoco-grasp-site": PHYSICAL_GRASP_FROM_EE.copy(),
+        "yam-pinch-pad-y-up": np.array(
+            [
+                [0.0, 1.0, 0.0, -0.00370353],
+                [0.0, 0.0, -1.0, -0.11295721],
+                [-1.0, 0.0, 0.0, 0.02354240],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        "yam-pinch-pad-y-down": np.array(
+            [
+                [0.0, 1.0, 0.0, -0.00370353],
+                [0.0, 0.0, 1.0, 0.11295721],
+                [1.0, 0.0, 0.0, -0.02354240],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
     }
     return candidates
 

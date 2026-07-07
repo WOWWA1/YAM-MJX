@@ -83,8 +83,20 @@ def main() -> None:
             "canonical-topdown-yaw-0",
             "canonical-topdown-yaw-pi",
             "mujoco-grasp-site-calibrated",
+            "yam-tilted-reachable",
+            "yam-tilted-grasp-frame",
+            "yam-side-pinch-y-up",
+            "yam-side-pinch-y-down",
+            "yam-pinch-pad-y-up",
+            "yam-pinch-pad-y-down",
         ),
         default="canonical-topdown-yaw-pi",
+    )
+    parser.add_argument(
+        "--tool-frame-local-offset",
+        type=lambda s: tuple(float(part.strip()) for part in s.split(",")),
+        default=(0.0, 0.0, 0.0),
+        help="Extra x,y,z translation added to the selected tool_from_ee frame.",
     )
     parser.add_argument("--disable-m2t2-grasps", action="store_true")
     parser.add_argument("--constraint-debug", action="store_true")
@@ -111,6 +123,7 @@ def main() -> None:
     _install_yam_debug_patches(
         tool_frame_mode=args.tool_frame_mode,
         m2t2_grasps=False if args.disable_m2t2_grasps else None,
+        tool_frame_local_offset=args.tool_frame_local_offset,
     )
     if args.constraint_debug:
         _install_constraint_debug()

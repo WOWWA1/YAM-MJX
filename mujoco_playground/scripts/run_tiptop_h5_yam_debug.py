@@ -452,6 +452,41 @@ def _make_tool_from_ee(
         ],
         side_pinch_ee_from_finger_midpoint,
     )
+    # Calibrated from the actual MuJoCo fingertip pad centers, not from a hand
+    # guessed offset. The pinch frame origin is the midpoint of the lf_down/rf_down
+    # inner box pad centers, +X is the real finger open/close axis, and +Z is the
+    # selected link_6 palm-side direction. These are T_pinch_ee constants for
+    # cuTAMP's convention: world_from_ee = world_from_grasp @ tool_from_ee.
+    yam_pinch_pad_y_up = torch.eye(4, device=device, dtype=dtype)
+    yam_pinch_pad_y_up[:3, :3] = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [-1.0, 0.0, 0.0],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    yam_pinch_pad_y_up[:3, 3] = torch.tensor(
+        [-0.00370353, -0.11295721, 0.02354240],
+        device=device,
+        dtype=dtype,
+    )
+    yam_pinch_pad_y_down = torch.eye(4, device=device, dtype=dtype)
+    yam_pinch_pad_y_down[:3, :3] = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    yam_pinch_pad_y_down[:3, 3] = torch.tensor(
+        [-0.00370353, 0.11295721, -0.02354240],
+        device=device,
+        dtype=dtype,
+    )
 
     if mode == "current":
         return with_offset(current)
@@ -483,6 +518,10 @@ def _make_tool_from_ee(
         return with_offset(side_pinch_y_up)
     if mode == "yam-side-pinch-y-down":
         return with_offset(side_pinch_y_down)
+    if mode == "yam-pinch-pad-y-up":
+        return with_offset(yam_pinch_pad_y_up)
+    if mode == "yam-pinch-pad-y-down":
+        return with_offset(yam_pinch_pad_y_down)
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
@@ -1021,6 +1060,8 @@ def main() -> None:
             "yam-tilted-grasp-frame",
             "yam-side-pinch-y-up",
             "yam-side-pinch-y-down",
+            "yam-pinch-pad-y-up",
+            "yam-pinch-pad-y-down",
         ),
         default="canonical-topdown-yaw-pi",
     )
