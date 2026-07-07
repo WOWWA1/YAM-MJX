@@ -700,6 +700,7 @@ def _install_yam_sim_bootstrap(
     rot_tol: float,
     joint_space_fallback: bool,
     ignore_robot_world_collision: bool,
+    ignore_robot_movable_collision: bool,
     drop_static_world: bool,
 ) -> None:
     """Patch tiptop_h5.run_planning for simulator bootstrap runs."""
@@ -747,6 +748,8 @@ def _install_yam_sim_bootstrap(
         constraint_to_tol["Collision"] = constraint_to_tol["Collision"].copy()
         if ignore_robot_world_collision:
             constraint_to_tol["Collision"]["robot_to_world"] = 1e6
+        if ignore_robot_movable_collision:
+            constraint_to_tol["Collision"]["robot_to_movables"] = 1e6
         constraint_to_tol["KinematicConstraint"] = constraint_to_tol["KinematicConstraint"].copy()
         constraint_to_tol["KinematicConstraint"]["rot_err"] = rot_tol
         constraint_to_mult = default_constraint_to_mult.copy()
@@ -948,6 +951,7 @@ def main() -> None:
     parser.add_argument("--yam-rot-tol", type=float, default=0.8)
     parser.add_argument("--joint-space-fallback", action="store_true")
     parser.add_argument("--ignore-robot-world-collision", action="store_true")
+    parser.add_argument("--ignore-robot-movable-collision", action="store_true")
     parser.add_argument("--drop-static-world", action="store_true")
     parser.add_argument("--pose-debug", action="store_true")
     parser.add_argument("--relax-approach-orientation", action="store_true")
@@ -988,6 +992,7 @@ def main() -> None:
             rot_tol=args.yam_rot_tol,
             joint_space_fallback=args.joint_space_fallback,
             ignore_robot_world_collision=args.ignore_robot_world_collision,
+            ignore_robot_movable_collision=args.ignore_robot_movable_collision,
             drop_static_world=args.drop_static_world,
         )
 
