@@ -487,6 +487,21 @@ def _make_tool_from_ee(
         device=device,
         dtype=dtype,
     )
+    yam_robotiq_pinch_pad = torch.eye(4, device=device, dtype=dtype)
+    yam_robotiq_pinch_pad[:3, :3] = torch.tensor(
+        [
+            [0.0, -1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    yam_robotiq_pinch_pad[:3, 3] = torch.tensor(
+        [0.00370353, 0.02354240, -0.11295721],
+        device=device,
+        dtype=dtype,
+    )
 
     if mode == "current":
         return with_offset(current)
@@ -522,6 +537,8 @@ def _make_tool_from_ee(
         return with_offset(yam_pinch_pad_y_up)
     if mode == "yam-pinch-pad-y-down":
         return with_offset(yam_pinch_pad_y_down)
+    if mode == "yam-robotiq-pinch-pad":
+        return with_offset(yam_robotiq_pinch_pad)
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
@@ -1062,6 +1079,7 @@ def main() -> None:
             "yam-side-pinch-y-down",
             "yam-pinch-pad-y-up",
             "yam-pinch-pad-y-down",
+            "yam-robotiq-pinch-pad",
         ),
         default="current",
     )

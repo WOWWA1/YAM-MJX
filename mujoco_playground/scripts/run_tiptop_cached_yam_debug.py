@@ -89,6 +89,7 @@ def main() -> None:
             "yam-side-pinch-y-down",
             "yam-pinch-pad-y-up",
             "yam-pinch-pad-y-down",
+            "yam-robotiq-pinch-pad",
         ),
         default="current",
     )
