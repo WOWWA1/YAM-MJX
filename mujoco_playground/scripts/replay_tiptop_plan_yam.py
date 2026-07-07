@@ -88,6 +88,30 @@ def _set_gripper(model: mujoco.MjModel, data: mujoco.MjData, value: float, telep
         data.qpos[7] = -value
 
 
+def _cube_qadr(model: mujoco.MjModel) -> int:
+    cube_jid = model.joint("tiptop_cube_freejoint").id
+    return int(model.jnt_qposadr[cube_jid])
+
+
+def _cube_position(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
+    return data.qpos[_cube_qadr(model) : _cube_qadr(model) + 3].copy()
+
+
+def _site_position(model: mujoco.MjModel, data: mujoco.MjData, site_name: str) -> np.ndarray:
+    return data.site_xpos[model.site(site_name).id].copy()
+
+
+def _set_attached_cube_pose(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    site_name: str,
+    offset: np.ndarray,
+) -> None:
+    cube_qadr = _cube_qadr(model)
+    data.qpos[cube_qadr : cube_qadr + 3] = _site_position(model, data, site_name) + offset
+    data.qpos[cube_qadr + 3 : cube_qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+
+
 def _reset_scene(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -154,6 +178,8 @@ def _play_plan(
     speed: float,
     teleport: bool,
     convert_curobo_to_mujoco_q: bool,
+    attach_on_close: bool,
+    attach_site: str,
 ) -> None:
     q_init = _curobo_q_to_mujoco(plan.get("q_init"), convert_curobo_to_mujoco_q)
     if q_init.shape != (6,):
@@ -186,6 +212,9 @@ def _play_plan(
             target = close_width if action == "close" else open_width
             print(f"Playing gripper action: {step.get('label', '<unnamed>')} -> {action}")
             _set_gripper(model, data, target, teleport=teleport)
+            if attach_on_close and action == "close":
+                offset = _cube_position(model, data) - _site_position(model, data, attach_site)
+                _set_attached_cube_pose(model, data, attach_site, offset)
             _sync_for(viewer, model, data, 0.8, speed, teleport=False)
         else:
             print(f"Skipping unknown plan step type: {step_type!r}")
@@ -250,6 +279,8 @@ def _render_plan_video(
     width: int,
     height: int,
     fps: float,
+    attach_on_close: bool,
+    attach_site: str,
 ) -> Path:
     q_init = _curobo_q_to_mujoco(plan.get("q_init"), convert_curobo_to_mujoco_q)
     if q_init.shape != (6,):
@@ -261,6 +292,7 @@ def _render_plan_video(
     with mujoco.Renderer(model, width=width, height=height) as renderer:
         _render_for(frames, renderer, model, data, 0.4, speed, fps, teleport=teleport)
 
+        attached_offset: np.ndarray | None = None
         for step in plan.get("steps", []):
             step_type = step.get("type")
             if step_type == "trajectory":
@@ -274,12 +306,17 @@ def _render_plan_video(
                         _curobo_q_to_mujoco(q, convert_curobo_to_mujoco_q),
                         teleport=teleport,
                     )
+                    if attached_offset is not None:
+                        _set_attached_cube_pose(model, data, attach_site, attached_offset)
                     _render_for(frames, renderer, model, data, dt, speed, fps, teleport=teleport)
             elif step_type == "gripper":
                 action = step.get("action")
                 target = close_width if action == "close" else open_width
                 print(f"Rendering gripper action: {step.get('label', '<unnamed>')} -> {action}")
                 _set_gripper(model, data, target, teleport=teleport)
+                if attach_on_close and action == "close":
+                    attached_offset = _cube_position(model, data) - _site_position(model, data, attach_site)
+                    _set_attached_cube_pose(model, data, attach_site, attached_offset)
                 _render_for(frames, renderer, model, data, 0.8, speed, fps, teleport=False)
             else:
                 print(f"Skipping unknown plan step type: {step_type!r}")
@@ -304,6 +341,8 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument("--attach-on-close", action="store_true")
+    parser.add_argument("--attach-site", default="grasp_site")
     parser.add_argument("--fovy", type=float, default=24.0)
     parser.add_argument(
         "--camera-pos",
@@ -352,6 +391,8 @@ def main() -> None:
             width=args.width,
             height=args.height,
             fps=args.fps,
+            attach_on_close=args.attach_on_close,
+            attach_site=args.attach_site,
         )
         print(f"Wrote replay video: {video_path}")
         return
@@ -383,6 +424,8 @@ def main() -> None:
                     speed=args.speed,
                     teleport=teleport,
                     convert_curobo_to_mujoco_q=not args.no_curobo_to_mujoco_q_conversion,
+                    attach_on_close=args.attach_on_close,
+                    attach_site=args.attach_site,
                 )
             viewer.sync()
             time.sleep(0.02)
