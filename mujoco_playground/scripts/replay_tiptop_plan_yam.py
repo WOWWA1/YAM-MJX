@@ -30,6 +30,8 @@ MARKER_COLORS = (
     np.array([1.0, 0.9, 0.0, 1.0], dtype=np.float32),
     np.array([1.0, 0.25, 0.9, 1.0], dtype=np.float32),
 )
+FINGERTIP_GEOM_MARKER_COLOR = np.array([1.0, 1.0, 1.0, 0.95], dtype=np.float32)
+FINGER_MIDPOINT_MARKER_COLOR = np.array([1.0, 0.45, 0.0, 1.0], dtype=np.float32)
 
 
 def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
@@ -43,6 +45,8 @@ def _parse_names(text: str) -> tuple[str, ...]:
 
 def _latest_plan() -> Path:
     roots = [
+        Path("/tmp/tiptop_yam_sim_grasp_frame"),
+        Path("/tmp/tiptop_yam_sim_grasp_zdown04"),
         Path("/tmp/tiptop_yam_sim_bootstrap"),
         Path("/tmp/tiptop_yam_debug"),
         Path("/tmp/tiptop_yam_debug_builtin_grasps"),
@@ -109,6 +113,44 @@ def _cube_position(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
 
 def _site_position(model: mujoco.MjModel, data: mujoco.MjData, site_name: str) -> np.ndarray:
     return data.site_xpos[model.site(site_name).id].copy()
+
+
+def _body_position(model: mujoco.MjModel, data: mujoco.MjData, body_name: str) -> np.ndarray:
+    return data.xpos[model.body(body_name).id].copy()
+
+
+def _geom_ids_for_body(model: mujoco.MjModel, body_name: str) -> list[int]:
+    body_id = model.body(body_name).id
+    return [geom_id for geom_id in range(model.ngeom) if int(model.geom_bodyid[geom_id]) == body_id]
+
+
+def _nearest_geom_to_point(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    body_name: str,
+    target_pos: np.ndarray,
+) -> int | None:
+    geom_ids = _geom_ids_for_body(model, body_name)
+    if not geom_ids:
+        return None
+    return min(geom_ids, key=lambda geom_id: float(np.linalg.norm(data.geom_xpos[geom_id] - target_pos)))
+
+
+def _finger_midpoint(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    body_names: tuple[str, ...],
+) -> np.ndarray | None:
+    if len(body_names) < 2:
+        return None
+    cube_pos = _cube_position(model, data)
+    selected = [
+        _nearest_geom_to_point(model, data, body_name, cube_pos)
+        for body_name in body_names[:2]
+    ]
+    if selected[0] is None or selected[1] is None:
+        return None
+    return np.mean([data.geom_xpos[int(geom_id)] for geom_id in selected], axis=0)
 
 
 def _set_attached_cube_pose(
@@ -230,30 +272,59 @@ def _play_plan(
             print(f"Skipping unknown plan step type: {step_type!r}")
 
 
-def _add_site_markers(
+def _add_marker(
+    scene: mujoco.MjvScene,
+    pos: np.ndarray,
+    radius: float,
+    color: np.ndarray,
+) -> None:
+    if scene.ngeom >= len(scene.geoms):
+        return
+    marker_mat = np.eye(3, dtype=np.float64).reshape(-1)
+    marker_size = np.array([radius, radius, radius], dtype=np.float64)
+    mujoco.mjv_initGeom(
+        scene.geoms[scene.ngeom],
+        mujoco.mjtGeom.mjGEOM_SPHERE,
+        marker_size,
+        pos,
+        marker_mat,
+        color,
+    )
+    scene.ngeom += 1
+
+
+def _add_debug_markers(
     renderer: mujoco.Renderer,
     model: mujoco.MjModel,
     data: mujoco.MjData,
     marker_sites: tuple[str, ...],
+    marker_bodies: tuple[str, ...],
+    marker_fingertip_geoms: tuple[str, ...],
+    marker_finger_midpoint_bodies: tuple[str, ...],
     marker_radius: float,
 ) -> None:
     scene = renderer.scene
-    marker_mat = np.eye(3, dtype=np.float64).reshape(-1)
-    marker_size = np.array([marker_radius, marker_radius, marker_radius], dtype=np.float64)
     for idx, site_name in enumerate(marker_sites):
-        if scene.ngeom >= len(scene.geoms):
-            return
         site_id = model.site(site_name).id
-        color = MARKER_COLORS[idx % len(MARKER_COLORS)]
-        mujoco.mjv_initGeom(
-            scene.geoms[scene.ngeom],
-            mujoco.mjtGeom.mjGEOM_SPHERE,
-            marker_size,
-            data.site_xpos[site_id],
-            marker_mat,
-            color,
+        _add_marker(scene, data.site_xpos[site_id], marker_radius, MARKER_COLORS[idx % len(MARKER_COLORS)])
+
+    body_offset = len(marker_sites)
+    for idx, body_name in enumerate(marker_bodies):
+        _add_marker(
+            scene,
+            _body_position(model, data, body_name),
+            marker_radius,
+            MARKER_COLORS[(body_offset + idx) % len(MARKER_COLORS)],
         )
-        scene.ngeom += 1
+
+    fingertip_radius = marker_radius * 0.45
+    for body_name in marker_fingertip_geoms:
+        for geom_id in _geom_ids_for_body(model, body_name):
+            _add_marker(scene, data.geom_xpos[geom_id], fingertip_radius, FINGERTIP_GEOM_MARKER_COLOR)
+
+    midpoint = _finger_midpoint(model, data, marker_finger_midpoint_bodies)
+    if midpoint is not None:
+        _add_marker(scene, midpoint, marker_radius * 1.35, FINGER_MIDPOINT_MARKER_COLOR)
 
 
 def _capture_frame(
@@ -261,10 +332,22 @@ def _capture_frame(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     marker_sites: tuple[str, ...],
+    marker_bodies: tuple[str, ...],
+    marker_fingertip_geoms: tuple[str, ...],
+    marker_finger_midpoint_bodies: tuple[str, ...],
     marker_radius: float,
 ) -> np.ndarray:
     renderer.update_scene(data, camera="tiptop_cam")
-    _add_site_markers(renderer, model, data, marker_sites, marker_radius)
+    _add_debug_markers(
+        renderer,
+        model,
+        data,
+        marker_sites,
+        marker_bodies,
+        marker_fingertip_geoms,
+        marker_finger_midpoint_bodies,
+        marker_radius,
+    )
     return renderer.render().copy()
 
 
@@ -278,6 +361,9 @@ def _render_for(
     fps: float,
     teleport: bool,
     marker_sites: tuple[str, ...],
+    marker_bodies: tuple[str, ...],
+    marker_fingertip_geoms: tuple[str, ...],
+    marker_finger_midpoint_bodies: tuple[str, ...],
     marker_radius: float,
 ) -> None:
     duration = max(duration / max(speed, 1e-6), 0.0)
@@ -285,7 +371,18 @@ def _render_for(
     for _ in range(frame_count):
         if not teleport:
             mujoco.mj_step(model, data)
-        frames.append(_capture_frame(renderer, model, data, marker_sites, marker_radius))
+        frames.append(
+            _capture_frame(
+                renderer,
+                model,
+                data,
+                marker_sites,
+                marker_bodies,
+                marker_fingertip_geoms,
+                marker_finger_midpoint_bodies,
+                marker_radius,
+            )
+        )
 
 
 def _write_video(output: Path, frames: list[np.ndarray], fps: float) -> Path:
@@ -327,6 +424,9 @@ def _render_plan_video(
     attach_on_close: bool,
     attach_site: str,
     marker_sites: tuple[str, ...],
+    marker_bodies: tuple[str, ...],
+    marker_fingertip_geoms: tuple[str, ...],
+    marker_finger_midpoint_bodies: tuple[str, ...],
     marker_radius: float,
 ) -> Path:
     q_init = _curobo_q_to_mujoco(plan.get("q_init"), convert_curobo_to_mujoco_q)
@@ -347,6 +447,9 @@ def _render_plan_video(
             fps,
             teleport=teleport,
             marker_sites=marker_sites,
+            marker_bodies=marker_bodies,
+            marker_fingertip_geoms=marker_fingertip_geoms,
+            marker_finger_midpoint_bodies=marker_finger_midpoint_bodies,
             marker_radius=marker_radius,
         )
 
@@ -376,6 +479,9 @@ def _render_plan_video(
                         fps,
                         teleport=teleport,
                         marker_sites=marker_sites,
+                        marker_bodies=marker_bodies,
+                        marker_fingertip_geoms=marker_fingertip_geoms,
+                        marker_finger_midpoint_bodies=marker_finger_midpoint_bodies,
                         marker_radius=marker_radius,
                     )
             elif step_type == "gripper":
@@ -396,6 +502,9 @@ def _render_plan_video(
                     fps,
                     teleport=False,
                     marker_sites=marker_sites,
+                    marker_bodies=marker_bodies,
+                    marker_fingertip_geoms=marker_fingertip_geoms,
+                    marker_finger_midpoint_bodies=marker_finger_midpoint_bodies,
                     marker_radius=marker_radius,
                 )
             else:
@@ -428,6 +537,24 @@ def main() -> None:
         type=_parse_names,
         default=(),
         help="Comma-separated MuJoCo site names to draw as colored spheres in headless video.",
+    )
+    parser.add_argument(
+        "--marker-bodies",
+        type=_parse_names,
+        default=(),
+        help="Comma-separated MuJoCo body origins to draw as colored spheres in headless video.",
+    )
+    parser.add_argument(
+        "--marker-fingertip-geoms",
+        type=_parse_names,
+        default=(),
+        help="Comma-separated body names whose direct geom centers should be drawn as small white spheres.",
+    )
+    parser.add_argument(
+        "--marker-finger-midpoint-bodies",
+        type=_parse_names,
+        default=(),
+        help="Two body names; draw the midpoint between each body's geom nearest the cube as an orange sphere.",
     )
     parser.add_argument("--marker-radius", type=float, default=0.01)
     parser.add_argument("--fovy", type=float, default=24.0)
@@ -469,6 +596,25 @@ def main() -> None:
             model.site(site_name)
             color = MARKER_COLORS[idx % len(MARKER_COLORS)]
             print(f"Marker {idx + 1}: site={site_name} rgba={color.tolist()}")
+    if args.marker_bodies:
+        for idx, body_name in enumerate(args.marker_bodies):
+            model.body(body_name)
+            color = MARKER_COLORS[(len(args.marker_sites) + idx) % len(MARKER_COLORS)]
+            print(f"Marker {len(args.marker_sites) + idx + 1}: body={body_name} rgba={color.tolist()}")
+    if args.marker_fingertip_geoms:
+        for body_name in args.marker_fingertip_geoms:
+            model.body(body_name)
+            print(f"Fingertip geom markers: body={body_name} rgba={FINGERTIP_GEOM_MARKER_COLOR.tolist()}")
+    if args.marker_finger_midpoint_bodies:
+        if len(args.marker_finger_midpoint_bodies) != 2:
+            raise ValueError("--marker-finger-midpoint-bodies expects exactly two body names")
+        for body_name in args.marker_finger_midpoint_bodies:
+            model.body(body_name)
+        print(
+            "Finger midpoint marker: "
+            f"bodies={list(args.marker_finger_midpoint_bodies)} "
+            f"rgba={FINGER_MIDPOINT_MARKER_COLOR.tolist()}"
+        )
 
     if args.video is not None:
         video_path = _render_plan_video(
@@ -488,6 +634,9 @@ def main() -> None:
             attach_on_close=args.attach_on_close,
             attach_site=args.attach_site,
             marker_sites=args.marker_sites,
+            marker_bodies=args.marker_bodies,
+            marker_fingertip_geoms=args.marker_fingertip_geoms,
+            marker_finger_midpoint_bodies=args.marker_finger_midpoint_bodies,
             marker_radius=args.marker_radius,
         )
         print(f"Wrote replay video: {video_path}")

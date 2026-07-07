@@ -133,6 +133,26 @@ def _body_pos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarr
         return None
 
 
+def _geom_ids_for_body(model: mujoco.MjModel, body_name: str) -> list[int]:
+    try:
+        body_id = model.body(body_name).id
+    except KeyError:
+        return []
+    return [geom_id for geom_id in range(model.ngeom) if int(model.geom_bodyid[geom_id]) == body_id]
+
+
+def _geom_name(model: mujoco.MjModel, geom_id: int) -> str:
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+    return name if name else f"geom_{geom_id}"
+
+
+def _geom_type_name(model: mujoco.MjModel, geom_id: int) -> str:
+    try:
+        return mujoco.mjtGeom(int(model.geom_type[geom_id])).name.replace("mjGEOM_", "").lower()
+    except ValueError:
+        return str(int(model.geom_type[geom_id]))
+
+
 def _print_point_delta(label: str, pos: np.ndarray, cube_center: np.ndarray, cube_half_extent: float) -> None:
     delta_center = pos - cube_center
     xy = float(np.linalg.norm(delta_center[:2]))
@@ -144,6 +164,94 @@ def _print_point_delta(label: str, pos: np.ndarray, cube_center: np.ndarray, cub
         f"dist_center={center_dist:.6f} xy={xy:.6f} "
         f"z_above_center={z_above_center:.6f} z_above_cube_top={z_above_top:.6f}"
     )
+
+
+def _select_geom(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    body_name: str,
+    target_pos: np.ndarray,
+    mode: str,
+) -> int | None:
+    geom_ids = _geom_ids_for_body(model, body_name)
+    if not geom_ids:
+        return None
+    if mode == "nearest-target":
+        return min(geom_ids, key=lambda geom_id: float(np.linalg.norm(data.geom_xpos[geom_id] - target_pos)))
+    if mode == "distal-local-z":
+        return max(geom_ids, key=lambda geom_id: float(model.geom_pos[geom_id, 2]))
+    raise ValueError(f"Unknown geom selection mode: {mode}")
+
+
+def _print_geom_body_report(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    body_names: list[str],
+    cube_center: np.ndarray,
+    cube_half_extent: float,
+) -> None:
+    for body_name in body_names:
+        geom_ids = _geom_ids_for_body(model, body_name)
+        if not geom_ids:
+            print(f"\nNo geoms found directly attached to body:{body_name}")
+            continue
+
+        print(f"\nGeoms directly attached to body:{body_name} (sorted by local z high-to-low):")
+        for geom_id in sorted(geom_ids, key=lambda gid: float(model.geom_pos[gid, 2]), reverse=True):
+            pos = data.geom_xpos[geom_id].copy()
+            label = f"geom:{body_name}/{_geom_name(model, geom_id)}"
+            _print_point_delta(label, pos, cube_center, cube_half_extent)
+            print(
+                "  "
+                f"type={_geom_type_name(model, geom_id)} "
+                f"local={np.round(model.geom_pos[geom_id], 6).tolist()} "
+                f"size={np.round(model.geom_size[geom_id], 6).tolist()}"
+            )
+
+
+def _print_finger_midpoint_report(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    body_names: list[str],
+    cube_center: np.ndarray,
+    cube_half_extent: float,
+) -> None:
+    if len(body_names) < 2:
+        return
+
+    target_points = {
+        "nearest cube center": cube_center,
+        "nearest cube top center": cube_center + np.array([0.0, 0.0, cube_half_extent], dtype=np.float64),
+    }
+    modes: list[tuple[str, str, np.ndarray | None]] = [
+        ("distal local z", "distal-local-z", None),
+        *[(name, "nearest-target", target) for name, target in target_points.items()],
+    ]
+
+    grasp_pos = _site_pos(model, data, "grasp_site")
+    for label, mode, target_pos in modes:
+        selected: list[int] = []
+        for body_name in body_names[:2]:
+            geom_id = _select_geom(model, data, body_name, cube_center if target_pos is None else target_pos, mode)
+            if geom_id is not None:
+                selected.append(geom_id)
+        if len(selected) != 2:
+            continue
+
+        midpoint = np.mean([data.geom_xpos[geom_id] for geom_id in selected], axis=0)
+        print(
+            f"\nFinger midpoint ({label}) from "
+            f"{body_names[0]}/{_geom_name(model, selected[0])} and "
+            f"{body_names[1]}/{_geom_name(model, selected[1])}:"
+        )
+        _print_point_delta("finger_midpoint", midpoint, cube_center, cube_half_extent)
+        if grasp_pos is not None:
+            delta = grasp_pos - midpoint
+            print(
+                "  "
+                f"grasp_site - finger_midpoint={np.round(delta, 6).tolist()} "
+                f"norm={np.linalg.norm(delta):.6f}"
+            )
 
 
 def _install_tiptop_paths() -> None:
@@ -207,6 +315,11 @@ def main() -> None:
     parser.add_argument("--camera-target", type=lambda s: _parse_vec(s, 3, "camera-target"), default=DEFAULT_CAMERA_TARGET)
     parser.add_argument("--sites", default="grasp_site,tcp_site")
     parser.add_argument("--bodies", default="link_6")
+    parser.add_argument(
+        "--geom-bodies",
+        default="lf_down,rf_down",
+        help="Comma-separated body names whose direct geom centers should be compared with the cube.",
+    )
     args = parser.parse_args()
 
     plan_path, plan = _load_plan(args.plan)
@@ -219,6 +332,7 @@ def main() -> None:
 
     sites = [name.strip() for name in args.sites.split(",") if name.strip()]
     bodies = [name.strip() for name in args.bodies.split(",") if name.strip()]
+    geom_bodies = [name.strip() for name in args.geom_bodies.split(",") if name.strip()]
 
     print(f"Loaded plan: {plan_path}")
     print(f"Using final pre-close q from: {q_label}")
@@ -239,6 +353,10 @@ def main() -> None:
             print(f"body {name!r} not found")
             continue
         _print_point_delta(f"body:{name}", pos, args.cube_pos, args.cube_half_extent)
+
+    if geom_bodies:
+        _print_geom_body_report(model, data, geom_bodies, args.cube_pos, args.cube_half_extent)
+        _print_finger_midpoint_report(model, data, geom_bodies, args.cube_pos, args.cube_half_extent)
 
     ee_pose = _try_curobo_ee(q_curobo)
     _print_curobo_comparison(ee_pose, model, data, sites, bodies)
