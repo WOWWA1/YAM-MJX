@@ -24,11 +24,21 @@ DEFAULT_CAMERA_POS = np.array([0.65, -0.30, 0.42], dtype=np.float64)
 DEFAULT_CAMERA_TARGET = np.array([0.45, 0.0, 0.025], dtype=np.float64)
 DEFAULT_CUBE_POS = np.array([0.45, 0.0, 0.025], dtype=np.float64)
 YAM_CUROBO_TO_MUJOCO_Q_SIGNS = np.array([1.0, 1.0, 1.0, 1.0, 1.0, -1.0], dtype=np.float64)
+MARKER_COLORS = (
+    np.array([0.05, 1.0, 0.15, 1.0], dtype=np.float32),
+    np.array([0.0, 0.85, 1.0, 1.0], dtype=np.float32),
+    np.array([1.0, 0.9, 0.0, 1.0], dtype=np.float32),
+    np.array([1.0, 0.25, 0.9, 1.0], dtype=np.float32),
+)
 
 
 def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
     return q * YAM_CUROBO_TO_MUJOCO_Q_SIGNS if convert else q
+
+
+def _parse_names(text: str) -> tuple[str, ...]:
+    return tuple(name.strip() for name in text.split(",") if name.strip())
 
 
 def _latest_plan() -> Path:
@@ -220,8 +230,41 @@ def _play_plan(
             print(f"Skipping unknown plan step type: {step_type!r}")
 
 
-def _capture_frame(renderer: mujoco.Renderer, data: mujoco.MjData) -> np.ndarray:
+def _add_site_markers(
+    renderer: mujoco.Renderer,
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    marker_sites: tuple[str, ...],
+    marker_radius: float,
+) -> None:
+    scene = renderer.scene
+    marker_mat = np.eye(3, dtype=np.float64).reshape(-1)
+    marker_size = np.array([marker_radius, marker_radius, marker_radius], dtype=np.float64)
+    for idx, site_name in enumerate(marker_sites):
+        if scene.ngeom >= len(scene.geoms):
+            return
+        site_id = model.site(site_name).id
+        color = MARKER_COLORS[idx % len(MARKER_COLORS)]
+        mujoco.mjv_initGeom(
+            scene.geoms[scene.ngeom],
+            mujoco.mjtGeom.mjGEOM_SPHERE,
+            marker_size,
+            data.site_xpos[site_id],
+            marker_mat,
+            color,
+        )
+        scene.ngeom += 1
+
+
+def _capture_frame(
+    renderer: mujoco.Renderer,
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    marker_sites: tuple[str, ...],
+    marker_radius: float,
+) -> np.ndarray:
     renderer.update_scene(data, camera="tiptop_cam")
+    _add_site_markers(renderer, model, data, marker_sites, marker_radius)
     return renderer.render().copy()
 
 
@@ -234,13 +277,15 @@ def _render_for(
     speed: float,
     fps: float,
     teleport: bool,
+    marker_sites: tuple[str, ...],
+    marker_radius: float,
 ) -> None:
     duration = max(duration / max(speed, 1e-6), 0.0)
     frame_count = max(1, int(round(duration * fps)))
     for _ in range(frame_count):
         if not teleport:
             mujoco.mj_step(model, data)
-        frames.append(_capture_frame(renderer, data))
+        frames.append(_capture_frame(renderer, model, data, marker_sites, marker_radius))
 
 
 def _write_video(output: Path, frames: list[np.ndarray], fps: float) -> Path:
@@ -281,6 +326,8 @@ def _render_plan_video(
     fps: float,
     attach_on_close: bool,
     attach_site: str,
+    marker_sites: tuple[str, ...],
+    marker_radius: float,
 ) -> Path:
     q_init = _curobo_q_to_mujoco(plan.get("q_init"), convert_curobo_to_mujoco_q)
     if q_init.shape != (6,):
@@ -290,7 +337,18 @@ def _render_plan_video(
     _reset_scene(model, data, q_init, cube_pos, open_width, teleport=teleport)
 
     with mujoco.Renderer(model, width=width, height=height) as renderer:
-        _render_for(frames, renderer, model, data, 0.4, speed, fps, teleport=teleport)
+        _render_for(
+            frames,
+            renderer,
+            model,
+            data,
+            0.4,
+            speed,
+            fps,
+            teleport=teleport,
+            marker_sites=marker_sites,
+            marker_radius=marker_radius,
+        )
 
         attached_offset: np.ndarray | None = None
         for step in plan.get("steps", []):
@@ -308,7 +366,18 @@ def _render_plan_video(
                     )
                     if attached_offset is not None:
                         _set_attached_cube_pose(model, data, attach_site, attached_offset)
-                    _render_for(frames, renderer, model, data, dt, speed, fps, teleport=teleport)
+                    _render_for(
+                        frames,
+                        renderer,
+                        model,
+                        data,
+                        dt,
+                        speed,
+                        fps,
+                        teleport=teleport,
+                        marker_sites=marker_sites,
+                        marker_radius=marker_radius,
+                    )
             elif step_type == "gripper":
                 action = step.get("action")
                 target = close_width if action == "close" else open_width
@@ -317,7 +386,18 @@ def _render_plan_video(
                 if attach_on_close and action == "close":
                     attached_offset = _cube_position(model, data) - _site_position(model, data, attach_site)
                     _set_attached_cube_pose(model, data, attach_site, attached_offset)
-                _render_for(frames, renderer, model, data, 0.8, speed, fps, teleport=False)
+                _render_for(
+                    frames,
+                    renderer,
+                    model,
+                    data,
+                    0.8,
+                    speed,
+                    fps,
+                    teleport=False,
+                    marker_sites=marker_sites,
+                    marker_radius=marker_radius,
+                )
             else:
                 print(f"Skipping unknown plan step type: {step_type!r}")
 
@@ -343,6 +423,13 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--attach-on-close", action="store_true")
     parser.add_argument("--attach-site", default="grasp_site")
+    parser.add_argument(
+        "--marker-sites",
+        type=_parse_names,
+        default=(),
+        help="Comma-separated MuJoCo site names to draw as colored spheres in headless video.",
+    )
+    parser.add_argument("--marker-radius", type=float, default=0.01)
     parser.add_argument("--fovy", type=float, default=24.0)
     parser.add_argument(
         "--camera-pos",
@@ -376,6 +463,13 @@ def main() -> None:
         "YAM replay q convention: "
         f"curobo_to_mujoco_q_conversion={'false' if args.no_curobo_to_mujoco_q_conversion else YAM_CUROBO_TO_MUJOCO_Q_SIGNS.tolist()}"
     )
+    if args.marker_sites:
+        for idx, site_name in enumerate(args.marker_sites):
+            # Validate up front so a misspelled site does not fail halfway through rendering.
+            model.site(site_name)
+            color = MARKER_COLORS[idx % len(MARKER_COLORS)]
+            print(f"Marker {idx + 1}: site={site_name} rgba={color.tolist()}")
+
     if args.video is not None:
         video_path = _render_plan_video(
             model=model,
@@ -393,6 +487,8 @@ def main() -> None:
             fps=args.fps,
             attach_on_close=args.attach_on_close,
             attach_site=args.attach_site,
+            marker_sites=args.marker_sites,
+            marker_radius=args.marker_radius,
         )
         print(f"Wrote replay video: {video_path}")
         return
