@@ -1063,7 +1063,7 @@ def main() -> None:
             "yam-pinch-pad-y-up",
             "yam-pinch-pad-y-down",
         ),
-        default="canonical-topdown-yaw-pi",
+        default="current",
     )
     parser.add_argument("--disable-m2t2-grasps", action="store_true")
     parser.add_argument(

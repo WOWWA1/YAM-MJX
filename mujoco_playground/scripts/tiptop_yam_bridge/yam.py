@@ -93,13 +93,32 @@ def get_yam_ik_solver(
     return IKSolver(ik_config)
 
 
-def get_yam_gripper_spheres(tensor_args: TensorDeviceType = TensorDeviceType()) -> Float[torch.Tensor, "num_spheres 4"]:
-    """Approximate YAM gripper spheres in the TiPToP tool frame.
+def get_yam_tool_from_ee(tensor_args: TensorDeviceType = TensorDeviceType()) -> Float[torch.Tensor, "4 4"]:
+    """Transform from TiPToP's grasp/tool frame to YAM's cuRobo EE frame.
 
-    The generated cuRobo config uses ``grasp_frame`` as the end-effector, so the
-    TiPToP tool frame is currently identical to the cuRobo EE frame.
+    TiPToP/cuTAMP uses ``world_from_ee = world_from_grasp @ tool_from_ee``.
+    This calibration puts the TiPToP grasp origin at the midpoint of YAM's
+    inner fingertip pads instead of at the wrist/link_6 frame.
     """
     return tensor_args.to_device(
+        [
+            [0.0, 1.0, 0.0, -0.00370353],
+            [0.0, 0.0, -1.0, -0.11295721],
+            [-1.0, 0.0, 0.0, 0.02354240],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+
+
+def _transform_sphere_centers(transform: torch.Tensor, spheres: torch.Tensor) -> torch.Tensor:
+    transformed = spheres.clone()
+    transformed[:, :3] = spheres[:, :3] @ transform[:3, :3].T + transform[:3, 3]
+    return transformed
+
+
+def get_yam_gripper_spheres(tensor_args: TensorDeviceType = TensorDeviceType()) -> Float[torch.Tensor, "num_spheres 4"]:
+    """Approximate YAM gripper spheres in the TiPToP tool frame."""
+    ee_spheres = tensor_args.to_device(
         [
             [0.0, 0.0, -0.055, 0.026],
             [0.0, 0.0, -0.025, 0.020],
@@ -109,6 +128,8 @@ def get_yam_gripper_spheres(tensor_args: TensorDeviceType = TensorDeviceType()) 
             [-0.032, 0.0, 0.010, 0.010],
         ]
     )
+    return _transform_sphere_centers(get_yam_tool_from_ee(tensor_args), ee_spheres)
+
 
 
 def load_yam_rerun(load_mesh: bool = True) -> RerunRobot:
@@ -123,4 +144,3 @@ def load_yam_rerun(load_mesh: bool = True) -> RerunRobot:
 
     urdf = URDF.load(str(urdf_path), filename_handler=_locate_asset)
     return RerunRobot("yam", urdf, q_neutral=yam_home, load_mesh=load_mesh)
-

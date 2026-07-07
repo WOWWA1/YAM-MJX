@@ -26,6 +26,7 @@ YAM_IMPORT = """from .yam import (
     yam_home,
     yam_curobo_cfg,
     get_yam_gripper_spheres,
+    get_yam_tool_from_ee,
     get_yam_ik_solver,
     get_yam_kinematics_model,
 )"""
@@ -37,7 +38,7 @@ def load_yam_container(tensor_args: TensorDeviceType) -> RobotContainer:
     assert joint_limits.shape == (2, 6), f"Invalid joint limits shape: {joint_limits.shape}"
 
     gripper_spheres = get_yam_gripper_spheres(tensor_args)
-    tool_from_ee = torch.eye(4, device=tensor_args.device)
+    tool_from_ee = get_yam_tool_from_ee(tensor_args)
     return RobotContainer("yam", kin_model, joint_limits, gripper_spheres, tool_from_ee)
 """
 

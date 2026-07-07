@@ -90,7 +90,7 @@ def main() -> None:
             "yam-pinch-pad-y-up",
             "yam-pinch-pad-y-down",
         ),
-        default="canonical-topdown-yaw-pi",
+        default="current",
     )
     parser.add_argument(
         "--tool-frame-local-offset",
