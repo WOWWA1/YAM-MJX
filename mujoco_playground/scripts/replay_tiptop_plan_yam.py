@@ -7,6 +7,7 @@ scene used by save_tiptop_h5_from_yam.py, then plays a saved tiptop_plan.json.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 import tempfile
@@ -355,7 +356,7 @@ def main() -> None:
         print(f"Wrote replay video: {video_path}")
         return
 
-    import mujoco.viewer
+    mujoco_viewer = importlib.import_module("mujoco.viewer")
 
     print("Viewer controls: press R to replay, close the viewer window to exit.")
 
@@ -367,7 +368,7 @@ def main() -> None:
             replay_requested = True
 
     teleport = args.playback_mode == "teleport"
-    with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
+    with mujoco_viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
         while viewer.is_running():
             if replay_requested:
                 replay_requested = False
