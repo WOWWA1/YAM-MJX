@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Diagnose where a saved TiPToP YAM plan places the gripper in MuJoCo.
+
+This is simulator-only. It loads a saved ``tiptop_plan.json``, jumps to the
+last arm waypoint before the first gripper close, and reports distances from
+MuJoCo gripper frames to the cube. If cuRobo/TiPToP are importable, it also
+compares cuRobo's YAM end-effector frame against the MuJoCo sites.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from typing import Any
+
+import mujoco
+import numpy as np
+
+from save_tiptop_h5_from_yam import _make_scene_xml, _parse_vec
+from yam_assets import YAM_DIR, require_yam_file
+
+
+DEFAULT_CAMERA_POS = np.array([0.65, -0.30, 0.42], dtype=np.float64)
+DEFAULT_CAMERA_TARGET = np.array([0.45, 0.0, 0.025], dtype=np.float64)
+DEFAULT_CUBE_POS = np.array([0.45, 0.0, 0.025], dtype=np.float64)
+YAM_CUROBO_TO_MUJOCO_Q_SIGNS = np.array([1.0, 1.0, 1.0, 1.0, 1.0, -1.0], dtype=np.float64)
+
+
+def _latest_plan() -> Path:
+    roots = [
+        Path("/tmp/tiptop_yam_sim_grasp_frame"),
+        Path("/tmp/tiptop_yam_sim_grasp_zdown04"),
+        Path("/tmp/tiptop_yam_sim_bootstrap"),
+        Path("/tmp/tiptop_yam_debug"),
+    ]
+    plans: list[Path] = []
+    for root in roots:
+        if root.exists():
+            plans.extend(root.glob("*/tiptop_plan.json"))
+    if not plans:
+        raise FileNotFoundError("No tiptop_plan.json found under known /tmp TiPToP run dirs")
+    return max(plans, key=lambda p: p.stat().st_mtime)
+
+
+def _load_plan(path: Path | None) -> tuple[Path, dict[str, Any]]:
+    plan_path = path if path is not None else _latest_plan()
+    with plan_path.open() as f:
+        return plan_path, json.load(f)
+
+
+def _pre_close_q(plan: dict[str, Any]) -> tuple[np.ndarray, str]:
+    q = np.asarray(plan.get("q_init"), dtype=np.float64)
+    label = "q_init"
+    for step in plan.get("steps", []):
+        if step.get("type") == "trajectory":
+            positions = step.get("positions") or []
+            if positions:
+                q = np.asarray(positions[-1], dtype=np.float64)
+                label = str(step.get("label", "trajectory"))
+        elif step.get("type") == "gripper" and step.get("action") == "close":
+            break
+    if q.shape != (6,):
+        raise ValueError(f"Expected 6 arm joints, got {q.shape}")
+    return q, label
+
+
+def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
+    return np.asarray(q, dtype=np.float64) * YAM_CUROBO_TO_MUJOCO_Q_SIGNS if convert else np.asarray(q, dtype=np.float64)
+
+
+def _load_model(camera_pos: np.ndarray, camera_target: np.ndarray, cube_pos: np.ndarray, fovy: float) -> mujoco.MjModel:
+    require_yam_file("yam.xml")
+    scene_xml = _make_scene_xml(
+        camera_pos=camera_pos,
+        camera_target=camera_target,
+        cube_pos=cube_pos,
+        fovy=fovy,
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", dir=YAM_DIR, delete=False) as tmp:
+        tmp.write(scene_xml)
+        tmp_xml = Path(tmp.name)
+    try:
+        return mujoco.MjModel.from_xml_path(str(tmp_xml))
+    finally:
+        tmp_xml.unlink(missing_ok=True)
+
+
+def _set_cube_pose(model: mujoco.MjModel, data: mujoco.MjData, cube_pos: np.ndarray) -> None:
+    cube_jid = model.joint("tiptop_cube_freejoint").id
+    cube_qadr = model.jnt_qposadr[cube_jid]
+    data.qpos[cube_qadr : cube_qadr + 3] = cube_pos
+    data.qpos[cube_qadr + 3 : cube_qadr + 7] = np.array([1.0, 0.0, 0.0, 0.0])
+
+
+def _set_state(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    q_mujoco: np.ndarray,
+    cube_pos: np.ndarray,
+    open_width: float,
+) -> None:
+    mujoco.mj_resetData(model, data)
+    home_id = model.key("home").id
+    data.qpos[:] = model.key_qpos[home_id]
+    data.ctrl[:] = model.key_ctrl[home_id]
+    data.qpos[:6] = q_mujoco
+    data.ctrl[:6] = q_mujoco
+    _set_cube_pose(model, data, cube_pos)
+    if model.nq >= 8:
+        data.qpos[6] = open_width
+        data.qpos[7] = -open_width
+    if model.nu >= 7:
+        data.ctrl[6] = open_width
+    data.qvel[:] = 0.0
+    mujoco.mj_forward(model, data)
+
+
+def _site_pos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarray | None:
+    try:
+        return data.site_xpos[model.site(name).id].copy()
+    except KeyError:
+        return None
+
+
+def _body_pos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarray | None:
+    try:
+        return data.xpos[model.body(name).id].copy()
+    except KeyError:
+        return None
+
+
+def _print_point_delta(label: str, pos: np.ndarray, cube_center: np.ndarray, cube_half_extent: float) -> None:
+    delta_center = pos - cube_center
+    xy = float(np.linalg.norm(delta_center[:2]))
+    center_dist = float(np.linalg.norm(delta_center))
+    z_above_center = float(delta_center[2])
+    z_above_top = float(pos[2] - (cube_center[2] + cube_half_extent))
+    print(
+        f"{label:18s} pos={np.round(pos, 6).tolist()} "
+        f"dist_center={center_dist:.6f} xy={xy:.6f} "
+        f"z_above_center={z_above_center:.6f} z_above_cube_top={z_above_top:.6f}"
+    )
+
+
+def _install_tiptop_paths() -> None:
+    tiptop_dir = os.environ.get("TIPTOP_PACKAGE_DIR")
+    if not tiptop_dir:
+        return
+    root = Path(tiptop_dir).expanduser().resolve()
+    for path in reversed((root / "cutamp", root / "curobo" / "src", root)):
+        if path.exists() and str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+
+def _try_curobo_ee(q_curobo: np.ndarray) -> np.ndarray | None:
+    _install_tiptop_paths()
+    try:
+        import torch
+        from curobo.types.base import TensorDeviceType
+        from cutamp.robots import load_yam_container
+    except Exception as exc:
+        print(f"\ncuRobo comparison skipped: {type(exc).__name__}: {exc}")
+        return None
+
+    tensor_args = TensorDeviceType()
+    container = load_yam_container(tensor_args)
+    q_t = tensor_args.to_device(q_curobo).view(1, -1)
+    with torch.no_grad():
+        ee_pose = container.kin_model.get_state(q_t).ee_pose.get_numpy_matrix()[0]
+    return np.asarray(ee_pose, dtype=np.float64)
+
+
+def _print_curobo_comparison(
+    ee_pose: np.ndarray | None,
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    compare_sites: list[str],
+    compare_bodies: list[str],
+) -> None:
+    if ee_pose is None:
+        return
+    ee_pos = ee_pose[:3, 3]
+    print(f"\ncuRobo EE/grasp_frame pos={np.round(ee_pos, 6).tolist()}")
+    for name in compare_sites:
+        pos = _site_pos(model, data, name)
+        if pos is not None:
+            print(f"  cuRobo EE - site {name:10s}: {np.round(ee_pos - pos, 6).tolist()} norm={np.linalg.norm(ee_pos - pos):.6f}")
+    for name in compare_bodies:
+        pos = _body_pos(model, data, name)
+        if pos is not None:
+            print(f"  cuRobo EE - body {name:10s}: {np.round(ee_pos - pos, 6).tolist()} norm={np.linalg.norm(ee_pos - pos):.6f}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--plan", type=Path, default=None)
+    parser.add_argument("--cube-pos", type=lambda s: _parse_vec(s, 3, "cube-pos"), default=DEFAULT_CUBE_POS)
+    parser.add_argument("--cube-half-extent", type=float, default=0.025)
+    parser.add_argument("--open-width", type=float, default=0.03)
+    parser.add_argument("--no-curobo-to-mujoco-q-conversion", action="store_true")
+    parser.add_argument("--fovy", type=float, default=24.0)
+    parser.add_argument("--camera-pos", type=lambda s: _parse_vec(s, 3, "camera-pos"), default=DEFAULT_CAMERA_POS)
+    parser.add_argument("--camera-target", type=lambda s: _parse_vec(s, 3, "camera-target"), default=DEFAULT_CAMERA_TARGET)
+    parser.add_argument("--sites", default="grasp_site,tcp_site")
+    parser.add_argument("--bodies", default="link_6")
+    args = parser.parse_args()
+
+    plan_path, plan = _load_plan(args.plan)
+    q_curobo, q_label = _pre_close_q(plan)
+    q_mujoco = _curobo_q_to_mujoco(q_curobo, convert=not args.no_curobo_to_mujoco_q_conversion)
+
+    model = _load_model(args.camera_pos, args.camera_target, args.cube_pos, args.fovy)
+    data = mujoco.MjData(model)
+    _set_state(model, data, q_mujoco, args.cube_pos, args.open_width)
+
+    sites = [name.strip() for name in args.sites.split(",") if name.strip()]
+    bodies = [name.strip() for name in args.bodies.split(",") if name.strip()]
+
+    print(f"Loaded plan: {plan_path}")
+    print(f"Using final pre-close q from: {q_label}")
+    print(f"q_curobo={np.round(q_curobo, 6).tolist()}")
+    print(f"q_mujoco={np.round(q_mujoco, 6).tolist()}")
+    print(f"cube_center={np.round(args.cube_pos, 6).tolist()} cube_top_z={args.cube_pos[2] + args.cube_half_extent:.6f}")
+
+    print("\nMuJoCo frame distances to cube:")
+    for name in sites:
+        pos = _site_pos(model, data, name)
+        if pos is None:
+            print(f"site {name!r} not found")
+            continue
+        _print_point_delta(f"site:{name}", pos, args.cube_pos, args.cube_half_extent)
+    for name in bodies:
+        pos = _body_pos(model, data, name)
+        if pos is None:
+            print(f"body {name!r} not found")
+            continue
+        _print_point_delta(f"body:{name}", pos, args.cube_pos, args.cube_half_extent)
+
+    ee_pose = _try_curobo_ee(q_curobo)
+    _print_curobo_comparison(ee_pose, model, data, sites, bodies)
+
+
+if __name__ == "__main__":
+    main()
