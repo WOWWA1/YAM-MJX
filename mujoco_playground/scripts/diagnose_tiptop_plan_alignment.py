@@ -224,6 +224,11 @@ def _geom_name(model: mujoco.MjModel, geom_id: int) -> str:
     return name if name else f"geom_{geom_id}"
 
 
+def _body_name(model: mujoco.MjModel, body_id: int) -> str:
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+    return name if name else f"body_{body_id}"
+
+
 def _geom_type_name(model: mujoco.MjModel, geom_id: int) -> str:
     try:
         return mujoco.mjtGeom(int(model.geom_type[geom_id])).name.replace("mjGEOM_", "").lower()
@@ -421,6 +426,44 @@ def _print_gripper_orientation_report(
         print("  warning: fingertip midpoint is more than 2 cm off the cube center in XY.")
 
 
+def _print_cube_contact_report(model: mujoco.MjModel, data: mujoco.MjData, cube_geom_name: str) -> None:
+    try:
+        cube_geom_id = model.geom(cube_geom_name).id
+    except KeyError:
+        return
+
+    contacts = []
+    for idx in range(data.ncon):
+        contact = data.contact[idx]
+        geom1 = int(contact.geom1)
+        geom2 = int(contact.geom2)
+        if cube_geom_id not in (geom1, geom2):
+            continue
+        other = geom2 if geom1 == cube_geom_id else geom1
+        body_id = int(model.geom_bodyid[other])
+        contacts.append(
+            (
+                float(contact.dist),
+                _geom_name(model, other),
+                _body_name(model, body_id),
+                np.asarray(contact.pos, dtype=np.float64).copy(),
+            )
+        )
+
+    print("\nMuJoCo pre-close cube contacts:")
+    if not contacts:
+        print("  none")
+        return
+
+    for dist, geom_name, body_name, pos in sorted(contacts, key=lambda row: row[0]):
+        status = "penetrating" if dist < 0.0 else "touching/near"
+        print(
+            "  "
+            f"{status}: cube vs {geom_name} ({body_name}) "
+            f"dist={dist:.6f} pos={np.round(pos, 6).tolist()}"
+        )
+
+
 def _install_tiptop_paths() -> None:
     tiptop_dir = os.environ.get("TIPTOP_PACKAGE_DIR")
     if not tiptop_dir:
@@ -500,6 +543,7 @@ def main() -> None:
         help="Current local offset used with --tool-frame-mode.",
     )
     parser.add_argument("--tool-frame-ee-site", default="grasp_site")
+    parser.add_argument("--cube-geom-name", default="tiptop_cube_geom")
     args = parser.parse_args()
 
     plan_path, plan = _load_plan(args.plan)
@@ -554,6 +598,7 @@ def main() -> None:
 
     if geom_bodies:
         _print_gripper_orientation_report(model, data, args.cube_pos, args.cube_half_extent, geom_bodies)
+        _print_cube_contact_report(model, data, args.cube_geom_name)
         _print_geom_body_report(model, data, geom_bodies, args.cube_pos, args.cube_half_extent)
         _print_finger_midpoint_report(
             model,
