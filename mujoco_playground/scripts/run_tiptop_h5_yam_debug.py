@@ -380,6 +380,25 @@ def _make_tool_from_ee(mode: str, ref):
         dtype=dtype,
     )
 
+    # Empirically reachable YAM EE orientation for grasps near the simulator
+    # cube. Unlike the canonical top-down frames, this tilted wrist pose passes
+    # cuRobo IK with self-collision enabled.
+    yam_tilted_reachable = torch.eye(4, device=device, dtype=dtype)
+    yam_tilted_reachable[:3, :3] = torch.tensor(
+        [
+            [-0.535512, -0.034585, 0.843819],
+            [0.010009, 0.998831, 0.047290],
+            [-0.844468, 0.033770, -0.534540],
+        ],
+        device=device,
+        dtype=dtype,
+    )
+    yam_tilted_reachable[:3, 3] = torch.tensor(
+        [-0.00654240, -0.00370353, 0.13415721],
+        device=device,
+        dtype=dtype,
+    )
+
     if mode == "current":
         return current
     if mode == "current-inverse":
@@ -402,6 +421,8 @@ def _make_tool_from_ee(mode: str, ref):
         return canonical_topdown_yaw_pi
     if mode == "mujoco-grasp-site-calibrated":
         return mujoco_grasp_site_calibrated
+    if mode == "yam-tilted-reachable":
+        return yam_tilted_reachable
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
@@ -911,6 +932,7 @@ def main() -> None:
             "canonical-topdown-yaw-0",
             "canonical-topdown-yaw-pi",
             "mujoco-grasp-site-calibrated",
+            "yam-tilted-reachable",
         ),
         default="canonical-topdown-yaw-pi",
     )
