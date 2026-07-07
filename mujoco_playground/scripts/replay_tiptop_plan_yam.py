@@ -41,6 +41,23 @@ YAM_TILTED_GRASP_FRAME_ROT = np.array(
     ],
     dtype=np.float64,
 )
+YAM_SIDE_PINCH_Y_UP_ROT = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+YAM_SIDE_PINCH_Y_DOWN_ROT = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, -1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+YAM_SIDE_PINCH_FINGER_MIDPOINT = np.array([0.0, -0.017, 0.1135], dtype=np.float64)
 
 
 def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
@@ -145,9 +162,15 @@ def _tool_from_ee(mode: str, local_offset: tuple[float, float, float]) -> np.nda
         transform[:3, :3] = YAM_TILTED_GRASP_FRAME_ROT
     elif mode == "identity":
         transform[:3, :3] = np.eye(3, dtype=np.float64)
+    elif mode == "yam-side-pinch-y-up":
+        transform[:3, :3] = YAM_SIDE_PINCH_Y_UP_ROT
+        transform[:3, 3] = -(YAM_SIDE_PINCH_Y_UP_ROT @ YAM_SIDE_PINCH_FINGER_MIDPOINT)
+    elif mode == "yam-side-pinch-y-down":
+        transform[:3, :3] = YAM_SIDE_PINCH_Y_DOWN_ROT
+        transform[:3, 3] = -(YAM_SIDE_PINCH_Y_DOWN_ROT @ YAM_SIDE_PINCH_FINGER_MIDPOINT)
     else:
         raise ValueError(f"Unknown marker tool-frame mode: {mode}")
-    transform[:3, 3] = np.asarray(local_offset, dtype=np.float64)
+    transform[:3, 3] += np.asarray(local_offset, dtype=np.float64)
     return transform
 
 
@@ -643,7 +666,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--marker-tool-frame-mode",
-        choices=("yam-tilted-grasp-frame", "identity"),
+        choices=("yam-tilted-grasp-frame", "yam-side-pinch-y-up", "yam-side-pinch-y-down", "identity"),
         default=None,
         help="Draw the virtual TiPToP tool/grasp origin implied by this tool_from_ee mode as a yellow sphere.",
     )

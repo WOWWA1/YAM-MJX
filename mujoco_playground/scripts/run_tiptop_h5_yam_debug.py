@@ -323,6 +323,17 @@ def _make_tool_from_ee(
         transform[:3, 3] += offset
         return transform
 
+    def from_rotation_and_finger_midpoint(rotation_rows, ee_from_finger):
+        transform = torch.eye(4, device=device, dtype=dtype)
+        rotation = torch.tensor(rotation_rows, device=device, dtype=dtype)
+        finger = torch.tensor(ee_from_finger, device=device, dtype=dtype)
+        transform[:3, :3] = rotation
+        # cuTAMP uses world_from_ee = world_from_tool @ tool_from_ee.
+        # Choose the translation so the measured YAM fingertip midpoint lands
+        # at the virtual TiPToP grasp/tool origin.
+        transform[:3, 3] = -(rotation @ finger)
+        return transform
+
     mujoco_site = torch.eye(4, device=device, dtype=dtype)
     mujoco_site[:3, :3] = _rz(-torch.pi / 2, device=device, dtype=dtype)
     mujoco_site[:3, 3] = torch.tensor([0.0, 0.0, 0.1347], device=device, dtype=dtype)
@@ -418,6 +429,29 @@ def _make_tool_from_ee(
     yam_tilted_grasp_frame = yam_tilted_reachable.clone()
     yam_tilted_grasp_frame[:3, 3] = 0.0
 
+    # Side-pinch candidates. In the YAM MJCF, link_6 local X is the gripper
+    # opening/closing axis. These keep that axis horizontal and put link_6 local
+    # Y vertical, so link_6 local Z approaches the object from the side instead
+    # of pressing downward onto the cube. The fingertip midpoint is estimated
+    # from the central inner fingertip geom pair in link_6 coordinates.
+    side_pinch_finger_midpoint = (0.0, -0.017, 0.1135)
+    side_pinch_y_up = from_rotation_and_finger_midpoint(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        side_pinch_finger_midpoint,
+    )
+    side_pinch_y_down = from_rotation_and_finger_midpoint(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, -1.0, 0.0],
+        ],
+        side_pinch_finger_midpoint,
+    )
+
     if mode == "current":
         return with_offset(current)
     if mode == "current-inverse":
@@ -444,6 +478,10 @@ def _make_tool_from_ee(
         return with_offset(yam_tilted_reachable)
     if mode == "yam-tilted-grasp-frame":
         return with_offset(yam_tilted_grasp_frame)
+    if mode == "yam-side-pinch-y-up":
+        return with_offset(side_pinch_y_up)
+    if mode == "yam-side-pinch-y-down":
+        return with_offset(side_pinch_y_down)
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
@@ -980,6 +1018,8 @@ def main() -> None:
             "mujoco-grasp-site-calibrated",
             "yam-tilted-reachable",
             "yam-tilted-grasp-frame",
+            "yam-side-pinch-y-up",
+            "yam-side-pinch-y-down",
         ),
         default="canonical-topdown-yaw-pi",
     )
