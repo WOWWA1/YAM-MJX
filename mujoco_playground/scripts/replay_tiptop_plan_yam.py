@@ -43,21 +43,21 @@ YAM_TILTED_GRASP_FRAME_ROT = np.array(
 )
 YAM_SIDE_PINCH_Y_UP_ROT = np.array(
     [
-        [1.0, 0.0, 0.0],
-        [0.0, 0.0, -1.0],
         [0.0, 1.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [-1.0, 0.0, 0.0],
     ],
     dtype=np.float64,
 )
 YAM_SIDE_PINCH_Y_DOWN_ROT = np.array(
     [
-        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
-        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
     ],
     dtype=np.float64,
 )
-YAM_SIDE_PINCH_FINGER_MIDPOINT = np.array([0.0, -0.017, 0.1135], dtype=np.float64)
+YAM_SIDE_PINCH_FINGER_MIDPOINT = np.array([0.017, 0.0, -0.0212], dtype=np.float64)
 
 
 def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:

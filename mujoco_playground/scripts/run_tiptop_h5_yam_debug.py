@@ -433,23 +433,24 @@ def _make_tool_from_ee(
     # opening/closing axis. These keep that axis horizontal and put link_6 local
     # Y vertical, so link_6 local Z approaches the object from the side instead
     # of pressing downward onto the cube. The fingertip midpoint is estimated
-    # from the central inner fingertip geom pair in link_6 coordinates.
-    side_pinch_finger_midpoint = (0.0, -0.017, 0.1135)
+    # from the central inner fingertip geom pair and expressed in the cuRobo
+    # EE/grasp_site frame, not the raw link_6 frame.
+    side_pinch_ee_from_finger_midpoint = (0.017, 0.0, -0.0212)
     side_pinch_y_up = from_rotation_and_finger_midpoint(
         [
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
             [0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [-1.0, 0.0, 0.0],
         ],
-        side_pinch_finger_midpoint,
+        side_pinch_ee_from_finger_midpoint,
     )
     side_pinch_y_down = from_rotation_and_finger_midpoint(
         [
-            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
-            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
         ],
-        side_pinch_finger_midpoint,
+        side_pinch_ee_from_finger_midpoint,
     )
 
     if mode == "current":
