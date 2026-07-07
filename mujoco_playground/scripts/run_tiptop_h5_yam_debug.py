@@ -398,6 +398,8 @@ def _make_tool_from_ee(mode: str, ref):
         device=device,
         dtype=dtype,
     )
+    yam_tilted_grasp_frame = yam_tilted_reachable.clone()
+    yam_tilted_grasp_frame[:3, 3] = 0.0
 
     if mode == "current":
         return current
@@ -423,6 +425,8 @@ def _make_tool_from_ee(mode: str, ref):
         return mujoco_grasp_site_calibrated
     if mode == "yam-tilted-reachable":
         return yam_tilted_reachable
+    if mode == "yam-tilted-grasp-frame":
+        return yam_tilted_grasp_frame
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
@@ -933,6 +937,7 @@ def main() -> None:
             "canonical-topdown-yaw-pi",
             "mujoco-grasp-site-calibrated",
             "yam-tilted-reachable",
+            "yam-tilted-grasp-frame",
         ),
         default="canonical-topdown-yaw-pi",
     )
