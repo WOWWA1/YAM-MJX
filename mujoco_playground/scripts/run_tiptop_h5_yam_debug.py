@@ -726,6 +726,7 @@ def _install_yam_sim_bootstrap(
     joint_space_fallback: bool,
     ignore_robot_world_collision: bool,
     ignore_robot_movable_collision: bool,
+    robot_movable_collision_tol: float | None,
     drop_static_world: bool,
     num_resampling_attempts: int | None,
     max_motion_refine_attempts: int | None,
@@ -777,6 +778,8 @@ def _install_yam_sim_bootstrap(
             constraint_to_tol["Collision"]["robot_to_world"] = 1e6
         if ignore_robot_movable_collision:
             constraint_to_tol["Collision"]["robot_to_movables"] = 1e6
+        elif robot_movable_collision_tol is not None:
+            constraint_to_tol["Collision"]["robot_to_movables"] = robot_movable_collision_tol
         constraint_to_tol["KinematicConstraint"] = constraint_to_tol["KinematicConstraint"].copy()
         constraint_to_tol["KinematicConstraint"]["rot_err"] = rot_tol
         constraint_to_mult = default_constraint_to_mult.copy()
@@ -994,6 +997,16 @@ def main() -> None:
     parser.add_argument("--joint-space-fallback", action="store_true")
     parser.add_argument("--ignore-robot-world-collision", action="store_true")
     parser.add_argument("--ignore-robot-movable-collision", action="store_true")
+    parser.add_argument(
+        "--robot-movable-collision-tol",
+        type=float,
+        default=None,
+        help=(
+            "Override cuTAMP robot_to_movables collision tolerance. Useful for "
+            "allowing small fingertip contact/penetration without fully ignoring "
+            "robot-object collision."
+        ),
+    )
     parser.add_argument("--drop-static-world", action="store_true")
     parser.add_argument("--yam-num-resampling-attempts", type=int, default=None)
     parser.add_argument("--yam-max-motion-refine-attempts", type=int, default=None)
@@ -1038,6 +1051,7 @@ def main() -> None:
             joint_space_fallback=args.joint_space_fallback,
             ignore_robot_world_collision=args.ignore_robot_world_collision,
             ignore_robot_movable_collision=args.ignore_robot_movable_collision,
+            robot_movable_collision_tol=args.robot_movable_collision_tol,
             drop_static_world=args.drop_static_world,
             num_resampling_attempts=args.yam_num_resampling_attempts,
             max_motion_refine_attempts=args.yam_max_motion_refine_attempts,
@@ -1049,6 +1063,7 @@ def main() -> None:
         "YAM debug run: "
         f"tool_frame_mode={args.tool_frame_mode}, "
         f"tool_frame_local_offset={args.tool_frame_local_offset}, "
+        f"robot_movable_collision_tol={args.robot_movable_collision_tol}, "
         f"m2t2_grasps={'false' if args.disable_m2t2_grasps else 'tiptop-default'}, "
         f"q_sign_conversion={'false' if args.no_yam_q_sign_conversion else YAM_MUJOCO_TO_CUROBO_Q_SIGNS}"
     )
