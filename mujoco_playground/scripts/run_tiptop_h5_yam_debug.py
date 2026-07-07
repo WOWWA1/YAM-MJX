@@ -543,6 +543,17 @@ def _make_tool_from_ee(
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
 
+def _retarget_gripper_spheres(gripper_spheres, source_tool_from_ee, target_tool_from_ee):
+    """Express gripper spheres in the target TiPToP tool frame."""
+    source_from_target = target_tool_from_ee @ source_tool_from_ee.inverse()
+    retargeted = gripper_spheres.clone()
+    retargeted[:, :3] = (
+        gripper_spheres[:, :3] @ source_from_target[:3, :3].T
+        + source_from_target[:3, 3]
+    )
+    return retargeted
+
+
 def _install_yam_debug_patches(
     tool_frame_mode: str,
     m2t2_grasps: bool | None,
@@ -564,11 +575,16 @@ def _install_yam_debug_patches(
             container.tool_from_ee,
             local_offset=tool_frame_local_offset,
         )
+        gripper_spheres = _retarget_gripper_spheres(
+            container.gripper_spheres,
+            container.tool_from_ee,
+            tool_from_ee,
+        )
         return cutamp_robots.RobotContainer(
             name=container.name,
             kin_model=container.kin_model,
             joint_limits=container.joint_limits,
-            gripper_spheres=container.gripper_spheres,
+            gripper_spheres=gripper_spheres,
             tool_from_ee=tool_from_ee,
         )
 
