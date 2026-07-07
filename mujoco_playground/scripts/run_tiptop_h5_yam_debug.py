@@ -702,6 +702,8 @@ def _install_yam_sim_bootstrap(
     ignore_robot_world_collision: bool,
     ignore_robot_movable_collision: bool,
     drop_static_world: bool,
+    num_resampling_attempts: int | None,
+    max_motion_refine_attempts: int | None,
 ) -> None:
     """Patch tiptop_h5.run_planning for simulator bootstrap runs."""
     import time
@@ -796,7 +798,10 @@ def _install_yam_sim_bootstrap(
                 "cache_subgraphs": False,
                 "curobo_plan": False,
                 "enable_experiment_logging": False,
-                "num_resampling_attempts": max(config.num_resampling_attempts, 40),
+                "num_resampling_attempts": max(
+                    config.num_resampling_attempts,
+                    num_resampling_attempts or 40,
+                ),
             }
         )
         constraint_to_tol, constraint_to_mult = _constraint_tolerances(all_surfaces)
@@ -879,8 +884,14 @@ def _install_yam_sim_bootstrap(
                 "m2t2_grasps": False,
                 "approach": "sampling",
                 "cache_subgraphs": False,
-                "num_resampling_attempts": max(config.num_resampling_attempts, 20),
-                "max_motion_refine_attempts": max(config.max_motion_refine_attempts or 0, 16),
+                "num_resampling_attempts": max(
+                    config.num_resampling_attempts,
+                    num_resampling_attempts or 20,
+                ),
+                "max_motion_refine_attempts": max(
+                    config.max_motion_refine_attempts or 0,
+                    max_motion_refine_attempts or 16,
+                ),
             }
         )
         constraint_to_tol, constraint_to_mult = _constraint_tolerances(all_surfaces)
@@ -953,6 +964,8 @@ def main() -> None:
     parser.add_argument("--ignore-robot-world-collision", action="store_true")
     parser.add_argument("--ignore-robot-movable-collision", action="store_true")
     parser.add_argument("--drop-static-world", action="store_true")
+    parser.add_argument("--yam-num-resampling-attempts", type=int, default=None)
+    parser.add_argument("--yam-max-motion-refine-attempts", type=int, default=None)
     parser.add_argument("--pose-debug", action="store_true")
     parser.add_argument("--relax-approach-orientation", action="store_true")
     parser.add_argument("--ignore-pick-target-collision", action="store_true")
@@ -994,6 +1007,8 @@ def main() -> None:
             ignore_robot_world_collision=args.ignore_robot_world_collision,
             ignore_robot_movable_collision=args.ignore_robot_movable_collision,
             drop_static_world=args.drop_static_world,
+            num_resampling_attempts=args.yam_num_resampling_attempts,
+            max_motion_refine_attempts=args.yam_max_motion_refine_attempts,
         )
 
     run_tiptop_h5 = _tiptop_h5_module().run_tiptop_h5
