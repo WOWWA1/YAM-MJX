@@ -27,6 +27,13 @@ YAM_HOME_QPOS = (
 )
 
 
+def _parse_vec3(text: str) -> tuple[float, float, float]:
+    values = tuple(float(part.strip()) for part in text.split(",") if part.strip())
+    if len(values) != 3:
+        raise argparse.ArgumentTypeError("Expected three comma-separated values")
+    return values
+
+
 def _mujoco_q_to_curobo(q):
     """Convert simulator joint vectors to the YAM cuRobo/URDF convention."""
     import numpy as np
@@ -298,13 +305,23 @@ def _rz(theta, *, device, dtype):
     )
 
 
-def _make_tool_from_ee(mode: str, ref):
+def _make_tool_from_ee(
+    mode: str,
+    ref,
+    local_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+):
     """Return a candidate transform from grasp/tool frame to cuRobo EE frame."""
     import torch
 
     device = ref.device
     dtype = ref.dtype
     current = ref.clone()
+    offset = torch.tensor(local_offset, device=device, dtype=dtype)
+
+    def with_offset(transform):
+        transform = transform.clone()
+        transform[:3, 3] += offset
+        return transform
 
     mujoco_site = torch.eye(4, device=device, dtype=dtype)
     mujoco_site[:3, :3] = _rz(-torch.pi / 2, device=device, dtype=dtype)
@@ -402,36 +419,40 @@ def _make_tool_from_ee(mode: str, ref):
     yam_tilted_grasp_frame[:3, 3] = 0.0
 
     if mode == "current":
-        return current
+        return with_offset(current)
     if mode == "current-inverse":
-        return torch.linalg.inv(current)
+        return with_offset(torch.linalg.inv(current))
     if mode == "mujoco-site":
-        return mujoco_site
+        return with_offset(mujoco_site)
     if mode == "mujoco-site-inverse":
-        return torch.linalg.inv(mujoco_site)
+        return with_offset(torch.linalg.inv(mujoco_site))
     if mode == "measured-grasp-site":
-        return measured_grasp_site
+        return with_offset(measured_grasp_site)
     if mode == "measured-grasp-site-ee-above":
-        return measured_grasp_site_ee_above
+        return with_offset(measured_grasp_site_ee_above)
     if mode == "measured-grasp-site-ee-above-z-up":
-        return measured_grasp_site_ee_above_z_up
+        return with_offset(measured_grasp_site_ee_above_z_up)
     if mode == "measured-grasp-site-ee-above-z-up-yaw-pi":
-        return measured_grasp_site_ee_above_z_up_yaw_pi
+        return with_offset(measured_grasp_site_ee_above_z_up_yaw_pi)
     if mode == "canonical-topdown-yaw-0":
-        return canonical_topdown_yaw_0
+        return with_offset(canonical_topdown_yaw_0)
     if mode == "canonical-topdown-yaw-pi":
-        return canonical_topdown_yaw_pi
+        return with_offset(canonical_topdown_yaw_pi)
     if mode == "mujoco-grasp-site-calibrated":
-        return mujoco_grasp_site_calibrated
+        return with_offset(mujoco_grasp_site_calibrated)
     if mode == "yam-tilted-reachable":
-        return yam_tilted_reachable
+        return with_offset(yam_tilted_reachable)
     if mode == "yam-tilted-grasp-frame":
-        return yam_tilted_grasp_frame
+        return with_offset(yam_tilted_grasp_frame)
 
     raise ValueError(f"Unknown tool-frame mode: {mode}")
 
 
-def _install_yam_debug_patches(tool_frame_mode: str, m2t2_grasps: bool | None) -> None:
+def _install_yam_debug_patches(
+    tool_frame_mode: str,
+    m2t2_grasps: bool | None,
+    tool_frame_local_offset: tuple[float, float, float],
+) -> None:
     import cutamp.algorithm as cutamp_algorithm
     import cutamp.robots as cutamp_robots
     import tiptop.motion_planning as motion_planning
@@ -443,7 +464,11 @@ def _install_yam_debug_patches(tool_frame_mode: str, m2t2_grasps: bool | None) -
 
     def load_yam_container_debug(tensor_args):
         container = original_yam_loader(tensor_args)
-        tool_from_ee = _make_tool_from_ee(tool_frame_mode, container.tool_from_ee)
+        tool_from_ee = _make_tool_from_ee(
+            tool_frame_mode,
+            container.tool_from_ee,
+            local_offset=tool_frame_local_offset,
+        )
         return cutamp_robots.RobotContainer(
             name=container.name,
             kin_model=container.kin_model,
@@ -956,6 +981,12 @@ def main() -> None:
         default="canonical-topdown-yaw-pi",
     )
     parser.add_argument("--disable-m2t2-grasps", action="store_true")
+    parser.add_argument(
+        "--tool-frame-local-offset",
+        type=_parse_vec3,
+        default=(0.0, 0.0, 0.0),
+        help="Extra x,y,z translation added to the selected tool_from_ee frame.",
+    )
     parser.add_argument("--rr-spawn", action="store_true")
     parser.add_argument("--constraint-debug", action="store_true")
     parser.add_argument("--yam-sim-bootstrap", action="store_true")
@@ -988,6 +1019,7 @@ def main() -> None:
     _install_yam_debug_patches(
         tool_frame_mode=args.tool_frame_mode,
         m2t2_grasps=False if args.disable_m2t2_grasps else None,
+        tool_frame_local_offset=args.tool_frame_local_offset,
     )
     if not args.no_yam_q_sign_conversion:
         _install_yam_q_conversion_patch()
@@ -1016,6 +1048,7 @@ def main() -> None:
     print(
         "YAM debug run: "
         f"tool_frame_mode={args.tool_frame_mode}, "
+        f"tool_frame_local_offset={args.tool_frame_local_offset}, "
         f"m2t2_grasps={'false' if args.disable_m2t2_grasps else 'tiptop-default'}, "
         f"q_sign_conversion={'false' if args.no_yam_q_sign_conversion else YAM_MUJOCO_TO_CUROBO_Q_SIGNS}"
     )
