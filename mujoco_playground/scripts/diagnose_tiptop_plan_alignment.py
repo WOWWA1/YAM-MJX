@@ -141,6 +141,13 @@ def _body_pos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarr
         return None
 
 
+def _body_rot(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarray | None:
+    try:
+        return data.xmat[model.body(name).id].reshape(3, 3).copy()
+    except KeyError:
+        return None
+
+
 def _site_pose(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarray | None:
     try:
         site_id = model.site(name).id
@@ -318,6 +325,78 @@ def _print_finger_midpoint_report(
                 )
 
 
+def _print_gripper_orientation_report(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    cube_center: np.ndarray,
+    cube_half_extent: float,
+    geom_bodies: list[str],
+) -> None:
+    link6_pos = _body_pos(model, data, "link_6")
+    link6_rot = _body_rot(model, data, "link_6")
+    if link6_pos is None or link6_rot is None or len(geom_bodies) < 2:
+        return
+
+    world_z = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    opening_axis = link6_rot[:, 0]
+    finger_forward_axis = link6_rot[:, 2]
+    palm_side_axis = link6_rot[:, 1]
+
+    selected = [
+        _select_geom(model, data, geom_bodies[0], cube_center, "nearest-target"),
+        _select_geom(model, data, geom_bodies[1], cube_center, "nearest-target"),
+    ]
+
+    print("\nGripper orientation sanity check:")
+    print(
+        "  "
+        f"opening_axis/link6_x={np.round(opening_axis, 6).tolist()} "
+        f"dot_world_z={float(np.dot(opening_axis, world_z)):.6f}"
+    )
+    print(
+        "  "
+        f"finger_forward/link6_z={np.round(finger_forward_axis, 6).tolist()} "
+        f"dot_world_z={float(np.dot(finger_forward_axis, world_z)):.6f}"
+    )
+    print(
+        "  "
+        f"palm_side/link6_y={np.round(palm_side_axis, 6).tolist()} "
+        f"dot_world_z={float(np.dot(palm_side_axis, world_z)):.6f}"
+    )
+
+    if selected[0] is None or selected[1] is None:
+        return
+
+    left_pos = data.geom_xpos[int(selected[0])].copy()
+    right_pos = data.geom_xpos[int(selected[1])].copy()
+    midpoint = 0.5 * (left_pos + right_pos)
+    pair_vec = right_pos - left_pos
+    pair_dist = float(np.linalg.norm(pair_vec))
+    pair_dir = pair_vec / max(pair_dist, 1e-9)
+    cube_full_width = cube_half_extent * 2.0
+    center_error = midpoint - cube_center
+    print(
+        "  "
+        f"nearest-center fingertip pair={_geom_name(model, int(selected[0]))}/"
+        f"{_geom_name(model, int(selected[1]))} center_dist={pair_dist:.6f} "
+        f"cube_width={cube_full_width:.6f}"
+    )
+    print(
+        "  "
+        f"pair_dir={np.round(pair_dir, 6).tolist()} "
+        f"alignment_with_opening_axis={abs(float(np.dot(pair_dir, opening_axis))):.6f}"
+    )
+    print(
+        "  "
+        f"midpoint_minus_cube_center={np.round(center_error, 6).tolist()} "
+        f"xy={np.linalg.norm(center_error[:2]):.6f} z={center_error[2]:.6f}"
+    )
+    if abs(float(np.dot(finger_forward_axis, world_z))) > 0.65:
+        print("  warning: finger forward axis is mostly vertical; this looks more like a top/down press than a side pinch.")
+    if np.linalg.norm(center_error[:2]) > 0.02:
+        print("  warning: fingertip midpoint is more than 2 cm off the cube center in XY.")
+
+
 def _install_tiptop_paths() -> None:
     tiptop_dir = os.environ.get("TIPTOP_PACKAGE_DIR")
     if not tiptop_dir:
@@ -450,6 +529,7 @@ def main() -> None:
             _print_point_delta("virtual_tool", virtual_tool_pos, args.cube_pos, args.cube_half_extent)
 
     if geom_bodies:
+        _print_gripper_orientation_report(model, data, args.cube_pos, args.cube_half_extent, geom_bodies)
         _print_geom_body_report(model, data, geom_bodies, args.cube_pos, args.cube_half_extent)
         _print_finger_midpoint_report(
             model,
