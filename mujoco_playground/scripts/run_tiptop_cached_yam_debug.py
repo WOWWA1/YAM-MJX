@@ -25,8 +25,10 @@ from run_tiptop_h5_yam_debug import (
     _install_pose_debug,
     _install_yam_debug_patches,
     _install_yam_sim_bootstrap,
+    _install_yam_tiptop_config,
     _mujoco_q_to_curobo,
     _prepare_tiptop_package_dir,
+    _tiptop_h5_module,
 )
 
 
@@ -104,6 +106,7 @@ def main() -> None:
 
     _prepare_tiptop_package_dir()
     _check_tiptop_dependencies()
+    _install_yam_tiptop_config()
 
     _install_yam_debug_patches(
         tool_frame_mode=args.tool_frame_mode,
@@ -127,8 +130,9 @@ def main() -> None:
     from tiptop.config import tiptop_cfg
     from tiptop.motion_planning import build_curobo_solvers
     from tiptop.planning import build_tamp_config, save_tiptop_plan, serialize_plan
-    from tiptop.tiptop_h5 import run_planning
     from tiptop.utils import check_cutamp_version, print_tiptop_banner, setup_logging
+
+    run_planning = _tiptop_h5_module().run_planning
 
     print_tiptop_banner()
     check_cutamp_version()

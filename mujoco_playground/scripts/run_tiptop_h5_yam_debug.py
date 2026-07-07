@@ -8,6 +8,7 @@ TiPToP's offline H5 path and monkeypatches YAM planning settings in memory.
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.util
 import os
 from pathlib import Path
@@ -16,6 +17,14 @@ import sys
 
 TIPTOP_PACKAGE_DIR = os.environ.get("TIPTOP_PACKAGE_DIR")
 YAM_MUJOCO_TO_CUROBO_Q_SIGNS = (1.0, 1.0, 1.0, 1.0, 1.0, -1.0)
+YAM_HOME_QPOS = (
+    -0.0368123903,
+    0.8585107195,
+    1.4494163424,
+    -1.1568245975,
+    -0.0783932250,
+    -0.0097276265,
+)
 
 
 def _mujoco_q_to_curobo(q):
@@ -37,19 +46,39 @@ def _mujoco_q_to_curobo(q):
 
 
 def _prepare_tiptop_package_dir() -> None:
-    if not TIPTOP_PACKAGE_DIR:
-        return
+    if TIPTOP_PACKAGE_DIR:
+        tiptop_path = Path(TIPTOP_PACKAGE_DIR).expanduser().resolve()
+    else:
+        tiptop_path = Path.cwd().resolve()
 
-    tiptop_package_dir = Path(TIPTOP_PACKAGE_DIR)
-    if not tiptop_package_dir.exists():
+    if not tiptop_path.exists():
         raise FileNotFoundError(
-            f"TIPTOP_PACKAGE_DIR points to a missing path: {tiptop_package_dir}"
+            f"TIPTOP_PACKAGE_DIR points to a missing path: {tiptop_path}"
         )
 
-    if (tiptop_package_dir / "__init__.py").exists():
-        sys.path.insert(0, str(tiptop_package_dir.parent))
+    if (tiptop_path / "tiptop" / "__init__.py").exists():
+        tiptop_root = tiptop_path
+        tiptop_package_dir = tiptop_path / "tiptop"
+    elif (tiptop_path / "__init__.py").exists() and tiptop_path.name == "tiptop":
+        tiptop_root = tiptop_path.parent
+        tiptop_package_dir = tiptop_path
+    elif TIPTOP_PACKAGE_DIR:
+        raise FileNotFoundError(
+            "TIPTOP_PACKAGE_DIR must point to a TiPToP checkout root or package "
+            f"directory, got: {tiptop_path}"
+        )
     else:
-        sys.path.insert(0, str(tiptop_package_dir))
+        return
+
+    # Avoid the checkout root's namespace-style cutamp/ directory shadowing the
+    # real cuTAMP package. The package source lives one level deeper.
+    for path in reversed((
+        tiptop_root / "cutamp",
+        tiptop_root / "curobo" / "src",
+        tiptop_root,
+    )):
+        if path.exists() and str(path) not in sys.path:
+            sys.path.insert(0, str(path))
     os.chdir(tiptop_package_dir)
 
 
@@ -66,6 +95,191 @@ def _check_tiptop_dependencies() -> None:
             + ". Install TiPToP/cuTAMP in this venv, or set TIPTOP_PACKAGE_DIR "
             "to a local TiPToP checkout that Python can import."
         )
+
+
+def _tiptop_h5_module():
+    """Return TiPToP's offline H5 module across old/new module names."""
+    try:
+        return importlib.import_module("tiptop.tiptop_h5")
+    except ModuleNotFoundError as exc:
+        if exc.name != "tiptop.tiptop_h5":
+            raise
+        return importlib.import_module("tiptop.tiptop_offline")
+
+
+def _install_gemini_json_repair_patch() -> None:
+    """Repair a common malformed Gemini bbox response seen in debug runs."""
+    import json
+    import re
+
+    import tiptop.perception.gemini as gemini
+
+    original_parse_response = gemini._parse_response
+
+    def clean_response_text(response_text: str) -> str:
+        cleaned = response_text.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned.replace("```json", "").replace("```", "")
+        elif cleaned.startswith("```"):
+            cleaned = cleaned.replace("```", "")
+        return cleaned.strip()
+
+    def repair_bbox_arrays(cleaned: str) -> str:
+        # Occasionally Gemini returns:
+        # {"box_2d": [ymin, xmin, "label": "...", "ymax": ymax, "xmax": xmax]}
+        # instead of the requested:
+        # {"box_2d": [ymin, xmin, ymax, xmax], "label": "..."}
+        pattern = re.compile(
+            r'\{\s*"box_2d"\s*:\s*\[\s*'
+            r"(-?\d+)\s*,\s*(-?\d+)\s*,\s*"
+            r'"label"\s*:\s*"([^"]+)"\s*,\s*'
+            r'"ymax"\s*:\s*(-?\d+)\s*,\s*'
+            r'"xmax"\s*:\s*(-?\d+)\s*'
+            r"\]\s*\}"
+        )
+
+        def repl(match: re.Match[str]) -> str:
+            ymin, xmin, label, ymax, xmax = match.groups()
+            return json.dumps(
+                {
+                    "box_2d": [int(ymin), int(xmin), int(ymax), int(xmax)],
+                    "label": label,
+                }
+            )
+
+        return pattern.sub(repl, cleaned)
+
+    def parse_response_with_bbox_repair(response_text: str):
+        try:
+            return original_parse_response(response_text)
+        except ValueError:
+            cleaned = clean_response_text(response_text)
+            repaired = repair_bbox_arrays(cleaned)
+            if repaired == cleaned:
+                raise
+            result = json.loads(repaired)
+            bboxes = result.get("bboxes", [])
+            grounded_atoms = [
+                {"predicate": spec["name"], "args": spec["args"]}
+                for spec in result.get("predicates", [])
+                if spec.get("name") and spec.get("args")
+            ]
+            print("YAM debug run: repaired malformed Gemini bbox JSON", flush=True)
+            return bboxes, grounded_atoms
+
+    gemini._parse_response = parse_response_with_bbox_repair
+
+
+def _install_cached_perception_patch(run_dir: Path) -> None:
+    """Reuse a saved TiPToP perception scene instead of calling Gemini/SAM2/M2T2."""
+    import json
+    import shutil
+
+    import dill
+    import torch
+    from tiptop.tiptop_run import ProcessedScene
+
+    tiptop_h5 = _tiptop_h5_module()
+    run_dir = run_dir.expanduser().resolve()
+    perception_dir = run_dir / "perception"
+    env_path = perception_dir / "cutamp_env.pkl"
+    grasps_path = perception_dir / "grasps.pt"
+    metadata_path = run_dir / "metadata.json"
+    required = (env_path, grasps_path, metadata_path)
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Cannot reuse perception; missing cached artifact(s): " + ", ".join(missing)
+        )
+
+    def copy_cached_artifacts(save_dir: Path) -> None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        dst_perception = save_dir / "perception"
+        dst_perception.mkdir(exist_ok=True)
+        for name in ("rgb.png", "bboxes_viz.png", "masks_viz.png"):
+            src = run_dir / name
+            if src.exists():
+                shutil.copy2(src, save_dir / name)
+        for src in perception_dir.iterdir():
+            if src.is_file():
+                shutil.copy2(src, dst_perception / src.name)
+
+    def surfaces_from_env(env):
+        type_to_objects = getattr(env, "type_to_objects", {}) or {}
+        surfaces = list(type_to_objects.get("Surface", []))
+        if surfaces:
+            return surfaces
+        return [
+            obj
+            for obj in getattr(env, "statics", [])
+            if getattr(obj, "name", None) != "debug_far_static"
+        ]
+
+    def rehydrate_tamp_atoms(env):
+        # Pickled Atom objects can carry process-local hash/cache state. Rebuild
+        # them so cuTAMP's skeleton generator can match goals in this process.
+        from cutamp.tamp_domain import all_tamp_fluents
+
+        fluent_by_name = {fluent.name: fluent for fluent in all_tamp_fluents}
+
+        def rehydrate_state(state):
+            return frozenset(
+                fluent_by_name[atom.name].ground(*atom.values) for atom in state
+            )
+
+        if hasattr(env, "initial_state"):
+            env.initial_state = rehydrate_state(env.initial_state)
+        if hasattr(env, "goal_state"):
+            env.goal_state = rehydrate_state(env.goal_state)
+        return env
+
+    async def cached_run_perception(
+        session,
+        observation,
+        task_instruction,
+        save_dir,
+        depth_estimator=None,
+        gripper_mask=None,
+        include_workspace=True,
+        log_to_rerun=True,
+    ):
+        del session, observation, task_instruction, depth_estimator, gripper_mask
+        del include_workspace, log_to_rerun
+        save_dir = Path(save_dir)
+        copy_cached_artifacts(save_dir)
+        with env_path.open("rb") as f:
+            env = rehydrate_tamp_atoms(dill.load(f))
+        map_location = "cuda:0" if torch.cuda.is_available() else "cpu"
+        grasps = torch.load(grasps_path, weights_only=False, map_location=map_location)
+        with metadata_path.open() as f:
+            metadata = json.load(f)
+        grounded_atoms = metadata.get("perception", {}).get("grounded_atoms", [])
+        all_surfaces = surfaces_from_env(env)
+        table_cuboid = all_surfaces[0] if all_surfaces else None
+        processed_scene = ProcessedScene(
+            table_cuboid=table_cuboid,
+            object_meshes={obj.name: obj for obj in getattr(env, "movables", [])},
+            object_pcds={},
+            grasps=grasps,
+        )
+        print(f"YAM debug run: reused cached perception from {run_dir}", flush=True)
+        return env, all_surfaces, processed_scene, grounded_atoms
+
+    tiptop_h5.run_perception = cached_run_perception
+
+
+def _install_yam_tiptop_config() -> None:
+    """Force the TiPToP runtime config to the simulator YAM embodiment."""
+    from omegaconf import OmegaConf
+    from tiptop.config import tiptop_cfg
+
+    cfg = tiptop_cfg()
+    OmegaConf.update(cfg, "robot.type", "yam", merge=False)
+    OmegaConf.update(cfg, "robot.dof", 6, merge=False)
+    OmegaConf.update(cfg, "robot.q_home", list(YAM_HOME_QPOS), merge=False)
+    OmegaConf.update(cfg, "robot.q_capture", list(YAM_HOME_QPOS), merge=False)
+    if not OmegaConf.select(cfg, "robot.time_dilation_factor"):
+        OmegaConf.update(cfg, "robot.time_dilation_factor", 0.2, merge=False, force_add=True)
 
 
 def _rz(theta, *, device, dtype):
@@ -197,7 +411,8 @@ def _install_yam_debug_patches(tool_frame_mode: str, m2t2_grasps: bool | None) -
     import cutamp.robots as cutamp_robots
     import tiptop.motion_planning as motion_planning
     import tiptop.planning as tiptop_planning
-    import tiptop.tiptop_h5 as tiptop_h5
+
+    tiptop_h5 = _tiptop_h5_module()
 
     original_yam_loader = cutamp_robots.robot_to_fns["yam"]["container"]
 
@@ -269,7 +484,7 @@ def _install_yam_debug_patches(tool_frame_mode: str, m2t2_grasps: bool | None) -
 def _install_yam_q_conversion_patch() -> None:
     from dataclasses import replace
 
-    import tiptop.tiptop_h5 as tiptop_h5
+    tiptop_h5 = _tiptop_h5_module()
 
     original_load_h5_observation = tiptop_h5.load_h5_observation
 
@@ -341,6 +556,7 @@ def _install_pose_debug(
     import cutamp.motion_solver as motion_solver
     from curobo.rollout.cost.pose_cost import PoseCostMetric
     from curobo.types.math import Pose
+    from curobo.wrap.reacher.motion_gen import MotionGen
 
     def pose_summary(mat):
         arr = mat.detach().cpu()
@@ -354,6 +570,47 @@ def _install_pose_debug(
             "y_axis": [round(float(v), 6) for v in y_axis],
             "z_axis": [round(float(v), 6) for v in z_axis],
         }
+
+    def pose_arg_summary(pose):
+        try:
+            mat = pose.get_matrix()
+            if mat.ndim == 3:
+                mat = mat[0]
+            return pose_summary(mat)
+        except Exception as exc:  # pragma: no cover - debug-only path.
+            return {"unprintable_pose": type(exc).__name__}
+
+    def result_success(result) -> bool:
+        success = getattr(result, "success", False)
+        if torch.is_tensor(success):
+            return bool(success.detach().any().cpu().item())
+        return bool(success)
+
+    original_plan_single = MotionGen.plan_single
+    plan_single_calls = {"n": 0}
+
+    def plan_single_debug(self, start_state, goal_pose, *args, **kwargs):
+        plan_single_calls["n"] += 1
+        call_idx = plan_single_calls["n"]
+        try:
+            start_q = start_state.position.detach().cpu().reshape(-1).numpy().tolist()
+            start_q = [round(float(v), 6) for v in start_q]
+        except Exception:
+            start_q = "<unprintable>"
+        print(
+            f"POSE_DEBUG plan_single call={call_idx} "
+            f"start_q={start_q} target={pose_arg_summary(goal_pose)}",
+            flush=True,
+        )
+        result = original_plan_single(self, start_state, goal_pose, *args, **kwargs)
+        print(
+            f"POSE_DEBUG plan_single call={call_idx} "
+            f"success={result_success(result)} status={getattr(result, 'status', None)}",
+            flush=True,
+        )
+        return result
+
+    MotionGen.plan_single = plan_single_debug
 
     def try_approach_offsets_debug(
         *,
@@ -424,7 +681,6 @@ def _install_yam_sim_bootstrap(
     import time
 
     import torch
-    import tiptop.tiptop_h5 as tiptop_h5
     from curobo.geom.types import Cuboid
     from cutamp.algorithm import run_cutamp, setup_cutamp
     from cutamp.envs import TAMPEnvironment
@@ -436,6 +692,21 @@ def _install_yam_sim_bootstrap(
     from cutamp.scripts.utils import default_constraint_to_mult, default_constraint_to_tol
     from cutamp.tamp_domain import Pick, all_tamp_operators
     from cutamp.task_planning import task_plan_generator
+
+    tiptop_h5 = _tiptop_h5_module()
+
+    original_particle_initializer_call = ParticleInitializer.__call__
+
+    def particle_initializer_without_none_metadata(self, *args, **kwargs):
+        particles = original_particle_initializer_call(self, *args, **kwargs)
+        if particles is None:
+            return None
+        # Heuristic grasps do not have M2T2 confidence scores. cuTAMP already
+        # ignores None metadata in one ranking path, but the sampling baseline
+        # assumes every particle entry is indexable when saving best_particle.
+        return {key: value for key, value in particles.items() if value is not None}
+
+    ParticleInitializer.__call__ = particle_initializer_without_none_metadata
 
     class SimpleJointPlan:
         def __init__(self, position: torch.Tensor, dt: float):
@@ -654,6 +925,11 @@ def main() -> None:
     parser.add_argument("--pose-debug", action="store_true")
     parser.add_argument("--relax-approach-orientation", action="store_true")
     parser.add_argument("--ignore-pick-target-collision", action="store_true")
+    parser.add_argument(
+        "--reuse-perception-from",
+        type=Path,
+        help="Saved TiPToP run directory whose perception/cutamp_env.pkl and grasps.pt should be reused.",
+    )
     parser.add_argument("--no-yam-q-sign-conversion", action="store_true")
     args = parser.parse_args()
 
@@ -663,12 +939,16 @@ def main() -> None:
     except ModuleNotFoundError as exc:
         raise SystemExit(str(exc)) from None
 
+    _install_yam_tiptop_config()
+    _install_gemini_json_repair_patch()
     _install_yam_debug_patches(
         tool_frame_mode=args.tool_frame_mode,
         m2t2_grasps=False if args.disable_m2t2_grasps else None,
     )
     if not args.no_yam_q_sign_conversion:
         _install_yam_q_conversion_patch()
+    if args.reuse_perception_from is not None:
+        _install_cached_perception_patch(args.reuse_perception_from)
     if args.constraint_debug:
         _install_constraint_debug()
     if args.pose_debug or args.ignore_pick_target_collision:
@@ -684,7 +964,7 @@ def main() -> None:
             drop_static_world=args.drop_static_world,
         )
 
-    from tiptop.tiptop_h5 import run_tiptop_h5
+    run_tiptop_h5 = _tiptop_h5_module().run_tiptop_h5
 
     print(
         "YAM debug run: "

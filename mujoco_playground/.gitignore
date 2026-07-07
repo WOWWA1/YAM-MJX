@@ -5,6 +5,8 @@ __pycache__
 .uv-cache
 MUJOCO_LOG.TXT
 mujoco_menagerie
+mujoco_playground/external_deps/
+tiptop_yam_assets/
 checkpoints/
 logs
 .mujoco_playground_asset_cache/
