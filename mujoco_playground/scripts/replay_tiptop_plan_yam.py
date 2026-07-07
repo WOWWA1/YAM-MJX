@@ -32,6 +32,15 @@ MARKER_COLORS = (
 )
 FINGERTIP_GEOM_MARKER_COLOR = np.array([1.0, 1.0, 1.0, 0.95], dtype=np.float32)
 FINGER_MIDPOINT_MARKER_COLOR = np.array([1.0, 0.45, 0.0, 1.0], dtype=np.float32)
+TOOL_FRAME_MARKER_COLOR = np.array([1.0, 0.9, 0.0, 1.0], dtype=np.float32)
+YAM_TILTED_GRASP_FRAME_ROT = np.array(
+    [
+        [-0.535512, -0.034585, 0.843819],
+        [0.010009, 0.998831, 0.047290],
+        [-0.844468, 0.033770, -0.534540],
+    ],
+    dtype=np.float64,
+)
 
 
 def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
@@ -41,6 +50,13 @@ def _curobo_q_to_mujoco(q: np.ndarray, convert: bool) -> np.ndarray:
 
 def _parse_names(text: str) -> tuple[str, ...]:
     return tuple(name.strip() for name in text.split(",") if name.strip())
+
+
+def _parse_vec3(text: str) -> tuple[float, float, float]:
+    values = tuple(float(part.strip()) for part in text.split(",") if part.strip())
+    if len(values) != 3:
+        raise argparse.ArgumentTypeError("Expected three comma-separated values")
+    return values
 
 
 def _latest_plan() -> Path:
@@ -113,6 +129,38 @@ def _cube_position(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
 
 def _site_position(model: mujoco.MjModel, data: mujoco.MjData, site_name: str) -> np.ndarray:
     return data.site_xpos[model.site(site_name).id].copy()
+
+
+def _site_pose(model: mujoco.MjModel, data: mujoco.MjData, site_name: str) -> np.ndarray:
+    site_id = model.site(site_name).id
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, :3] = data.site_xmat[site_id].reshape(3, 3)
+    pose[:3, 3] = data.site_xpos[site_id]
+    return pose
+
+
+def _tool_from_ee(mode: str, local_offset: tuple[float, float, float]) -> np.ndarray:
+    transform = np.eye(4, dtype=np.float64)
+    if mode == "yam-tilted-grasp-frame":
+        transform[:3, :3] = YAM_TILTED_GRASP_FRAME_ROT
+    elif mode == "identity":
+        transform[:3, :3] = np.eye(3, dtype=np.float64)
+    else:
+        raise ValueError(f"Unknown marker tool-frame mode: {mode}")
+    transform[:3, 3] = np.asarray(local_offset, dtype=np.float64)
+    return transform
+
+
+def _tool_origin_position(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    ee_site: str,
+    mode: str,
+    local_offset: tuple[float, float, float],
+) -> np.ndarray:
+    world_from_ee = _site_pose(model, data, ee_site)
+    world_from_tool = world_from_ee @ np.linalg.inv(_tool_from_ee(mode, local_offset))
+    return world_from_tool[:3, 3].copy()
 
 
 def _body_position(model: mujoco.MjModel, data: mujoco.MjData, body_name: str) -> np.ndarray:
@@ -301,6 +349,9 @@ def _add_debug_markers(
     marker_bodies: tuple[str, ...],
     marker_fingertip_geoms: tuple[str, ...],
     marker_finger_midpoint_bodies: tuple[str, ...],
+    marker_tool_frame_mode: str | None,
+    marker_tool_frame_local_offset: tuple[float, float, float],
+    marker_tool_frame_site: str,
     marker_radius: float,
 ) -> None:
     scene = renderer.scene
@@ -326,6 +377,16 @@ def _add_debug_markers(
     if midpoint is not None:
         _add_marker(scene, midpoint, marker_radius * 1.35, FINGER_MIDPOINT_MARKER_COLOR)
 
+    if marker_tool_frame_mode is not None:
+        tool_pos = _tool_origin_position(
+            model,
+            data,
+            marker_tool_frame_site,
+            marker_tool_frame_mode,
+            marker_tool_frame_local_offset,
+        )
+        _add_marker(scene, tool_pos, marker_radius * 1.45, TOOL_FRAME_MARKER_COLOR)
+
 
 def _capture_frame(
     renderer: mujoco.Renderer,
@@ -335,6 +396,9 @@ def _capture_frame(
     marker_bodies: tuple[str, ...],
     marker_fingertip_geoms: tuple[str, ...],
     marker_finger_midpoint_bodies: tuple[str, ...],
+    marker_tool_frame_mode: str | None,
+    marker_tool_frame_local_offset: tuple[float, float, float],
+    marker_tool_frame_site: str,
     marker_radius: float,
 ) -> np.ndarray:
     renderer.update_scene(data, camera="tiptop_cam")
@@ -346,6 +410,9 @@ def _capture_frame(
         marker_bodies,
         marker_fingertip_geoms,
         marker_finger_midpoint_bodies,
+        marker_tool_frame_mode,
+        marker_tool_frame_local_offset,
+        marker_tool_frame_site,
         marker_radius,
     )
     return renderer.render().copy()
@@ -364,6 +431,9 @@ def _render_for(
     marker_bodies: tuple[str, ...],
     marker_fingertip_geoms: tuple[str, ...],
     marker_finger_midpoint_bodies: tuple[str, ...],
+    marker_tool_frame_mode: str | None,
+    marker_tool_frame_local_offset: tuple[float, float, float],
+    marker_tool_frame_site: str,
     marker_radius: float,
 ) -> None:
     duration = max(duration / max(speed, 1e-6), 0.0)
@@ -380,6 +450,9 @@ def _render_for(
                 marker_bodies,
                 marker_fingertip_geoms,
                 marker_finger_midpoint_bodies,
+                marker_tool_frame_mode,
+                marker_tool_frame_local_offset,
+                marker_tool_frame_site,
                 marker_radius,
             )
         )
@@ -427,6 +500,9 @@ def _render_plan_video(
     marker_bodies: tuple[str, ...],
     marker_fingertip_geoms: tuple[str, ...],
     marker_finger_midpoint_bodies: tuple[str, ...],
+    marker_tool_frame_mode: str | None,
+    marker_tool_frame_local_offset: tuple[float, float, float],
+    marker_tool_frame_site: str,
     marker_radius: float,
 ) -> Path:
     q_init = _curobo_q_to_mujoco(plan.get("q_init"), convert_curobo_to_mujoco_q)
@@ -450,6 +526,9 @@ def _render_plan_video(
             marker_bodies=marker_bodies,
             marker_fingertip_geoms=marker_fingertip_geoms,
             marker_finger_midpoint_bodies=marker_finger_midpoint_bodies,
+            marker_tool_frame_mode=marker_tool_frame_mode,
+            marker_tool_frame_local_offset=marker_tool_frame_local_offset,
+            marker_tool_frame_site=marker_tool_frame_site,
             marker_radius=marker_radius,
         )
 
@@ -482,6 +561,9 @@ def _render_plan_video(
                         marker_bodies=marker_bodies,
                         marker_fingertip_geoms=marker_fingertip_geoms,
                         marker_finger_midpoint_bodies=marker_finger_midpoint_bodies,
+                        marker_tool_frame_mode=marker_tool_frame_mode,
+                        marker_tool_frame_local_offset=marker_tool_frame_local_offset,
+                        marker_tool_frame_site=marker_tool_frame_site,
                         marker_radius=marker_radius,
                     )
             elif step_type == "gripper":
@@ -505,6 +587,9 @@ def _render_plan_video(
                     marker_bodies=marker_bodies,
                     marker_fingertip_geoms=marker_fingertip_geoms,
                     marker_finger_midpoint_bodies=marker_finger_midpoint_bodies,
+                    marker_tool_frame_mode=marker_tool_frame_mode,
+                    marker_tool_frame_local_offset=marker_tool_frame_local_offset,
+                    marker_tool_frame_site=marker_tool_frame_site,
                     marker_radius=marker_radius,
                 )
             else:
@@ -556,6 +641,19 @@ def main() -> None:
         default=(),
         help="Two body names; draw the midpoint between each body's geom nearest the cube as an orange sphere.",
     )
+    parser.add_argument(
+        "--marker-tool-frame-mode",
+        choices=("yam-tilted-grasp-frame", "identity"),
+        default=None,
+        help="Draw the virtual TiPToP tool/grasp origin implied by this tool_from_ee mode as a yellow sphere.",
+    )
+    parser.add_argument(
+        "--marker-tool-frame-local-offset",
+        type=_parse_vec3,
+        default=(0.0, 0.0, 0.0),
+        help="Current local offset used with --marker-tool-frame-mode.",
+    )
+    parser.add_argument("--marker-tool-frame-site", default="grasp_site")
     parser.add_argument("--marker-radius", type=float, default=0.01)
     parser.add_argument("--fovy", type=float, default=24.0)
     parser.add_argument(
@@ -615,6 +713,15 @@ def main() -> None:
             f"bodies={list(args.marker_finger_midpoint_bodies)} "
             f"rgba={FINGER_MIDPOINT_MARKER_COLOR.tolist()}"
         )
+    if args.marker_tool_frame_mode is not None:
+        model.site(args.marker_tool_frame_site)
+        print(
+            "Virtual tool marker: "
+            f"mode={args.marker_tool_frame_mode} "
+            f"offset={args.marker_tool_frame_local_offset} "
+            f"ee_site={args.marker_tool_frame_site} "
+            f"rgba={TOOL_FRAME_MARKER_COLOR.tolist()}"
+        )
 
     if args.video is not None:
         video_path = _render_plan_video(
@@ -637,6 +744,9 @@ def main() -> None:
             marker_bodies=args.marker_bodies,
             marker_fingertip_geoms=args.marker_fingertip_geoms,
             marker_finger_midpoint_bodies=args.marker_finger_midpoint_bodies,
+            marker_tool_frame_mode=args.marker_tool_frame_mode,
+            marker_tool_frame_local_offset=args.marker_tool_frame_local_offset,
+            marker_tool_frame_site=args.marker_tool_frame_site,
             marker_radius=args.marker_radius,
         )
         print(f"Wrote replay video: {video_path}")

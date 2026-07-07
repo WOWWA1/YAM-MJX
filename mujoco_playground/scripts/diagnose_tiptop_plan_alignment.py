@@ -28,6 +28,14 @@ DEFAULT_CAMERA_POS = np.array([0.65, -0.30, 0.42], dtype=np.float64)
 DEFAULT_CAMERA_TARGET = np.array([0.45, 0.0, 0.025], dtype=np.float64)
 DEFAULT_CUBE_POS = np.array([0.45, 0.0, 0.025], dtype=np.float64)
 YAM_CUROBO_TO_MUJOCO_Q_SIGNS = np.array([1.0, 1.0, 1.0, 1.0, 1.0, -1.0], dtype=np.float64)
+YAM_TILTED_GRASP_FRAME_ROT = np.array(
+    [
+        [-0.535512, -0.034585, 0.843819],
+        [0.010009, 0.998831, 0.047290],
+        [-0.844468, 0.033770, -0.534540],
+    ],
+    dtype=np.float64,
+)
 
 
 def _latest_plan() -> Path:
@@ -133,6 +141,45 @@ def _body_pos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarr
         return None
 
 
+def _site_pose(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> np.ndarray | None:
+    try:
+        site_id = model.site(name).id
+    except KeyError:
+        return None
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, :3] = data.site_xmat[site_id].reshape(3, 3)
+    pose[:3, 3] = data.site_xpos[site_id]
+    return pose
+
+
+def _tool_from_ee(mode: str, local_offset: np.ndarray) -> np.ndarray:
+    transform = np.eye(4, dtype=np.float64)
+    if mode == "yam-tilted-grasp-frame":
+        transform[:3, :3] = YAM_TILTED_GRASP_FRAME_ROT
+    elif mode == "identity":
+        transform[:3, :3] = np.eye(3, dtype=np.float64)
+    else:
+        raise ValueError(
+            "Diagnostic virtual tool marker currently supports "
+            "'yam-tilted-grasp-frame' and 'identity'."
+        )
+    transform[:3, 3] = local_offset
+    return transform
+
+
+def _world_from_tool(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    site_name: str,
+    mode: str,
+    local_offset: np.ndarray,
+) -> np.ndarray | None:
+    world_from_ee = _site_pose(model, data, site_name)
+    if world_from_ee is None:
+        return None
+    return world_from_ee @ np.linalg.inv(_tool_from_ee(mode, local_offset))
+
+
 def _geom_ids_for_body(model: mujoco.MjModel, body_name: str) -> list[int]:
     try:
         body_id = model.body(body_name).id
@@ -215,6 +262,9 @@ def _print_finger_midpoint_report(
     body_names: list[str],
     cube_center: np.ndarray,
     cube_half_extent: float,
+    virtual_tool_pos: np.ndarray | None,
+    virtual_tool_rot: np.ndarray | None,
+    current_tool_offset: np.ndarray,
 ) -> None:
     if len(body_names) < 2:
         return
@@ -252,6 +302,20 @@ def _print_finger_midpoint_report(
                 f"grasp_site - finger_midpoint={np.round(delta, 6).tolist()} "
                 f"norm={np.linalg.norm(delta):.6f}"
             )
+        if virtual_tool_pos is not None:
+            delta = virtual_tool_pos - midpoint
+            print(
+                "  "
+                f"virtual_tool - finger_midpoint={np.round(delta, 6).tolist()} "
+                f"norm={np.linalg.norm(delta):.6f}"
+            )
+            if virtual_tool_rot is not None:
+                suggested_offset = current_tool_offset + virtual_tool_rot.T @ delta
+                print(
+                    "  "
+                    "suggested --tool-frame-local-offset "
+                    f"{','.join(f'{v:.6f}' for v in suggested_offset.tolist())}"
+                )
 
 
 def _install_tiptop_paths() -> None:
@@ -320,6 +384,19 @@ def main() -> None:
         default="lf_down,rf_down",
         help="Comma-separated body names whose direct geom centers should be compared with the cube.",
     )
+    parser.add_argument(
+        "--tool-frame-mode",
+        choices=("yam-tilted-grasp-frame", "identity"),
+        default=None,
+        help="If set, print the virtual TiPToP tool/grasp origin implied by this tool_from_ee mode.",
+    )
+    parser.add_argument(
+        "--tool-frame-local-offset",
+        type=lambda s: _parse_vec(s, 3, "tool-frame-local-offset"),
+        default=np.zeros(3, dtype=np.float64),
+        help="Current local offset used with --tool-frame-mode.",
+    )
+    parser.add_argument("--tool-frame-ee-site", default="grasp_site")
     args = parser.parse_args()
 
     plan_path, plan = _load_plan(args.plan)
@@ -354,9 +431,36 @@ def main() -> None:
             continue
         _print_point_delta(f"body:{name}", pos, args.cube_pos, args.cube_half_extent)
 
+    virtual_tool_pos = None
+    virtual_tool_rot = None
+    if args.tool_frame_mode is not None:
+        world_from_tool = _world_from_tool(
+            model,
+            data,
+            args.tool_frame_ee_site,
+            args.tool_frame_mode,
+            args.tool_frame_local_offset,
+        )
+        if world_from_tool is None:
+            print(f"tool-frame ee site {args.tool_frame_ee_site!r} not found")
+        else:
+            virtual_tool_pos = world_from_tool[:3, 3].copy()
+            virtual_tool_rot = world_from_tool[:3, :3].copy()
+            print("\nVirtual TiPToP tool/grasp origin:")
+            _print_point_delta("virtual_tool", virtual_tool_pos, args.cube_pos, args.cube_half_extent)
+
     if geom_bodies:
         _print_geom_body_report(model, data, geom_bodies, args.cube_pos, args.cube_half_extent)
-        _print_finger_midpoint_report(model, data, geom_bodies, args.cube_pos, args.cube_half_extent)
+        _print_finger_midpoint_report(
+            model,
+            data,
+            geom_bodies,
+            args.cube_pos,
+            args.cube_half_extent,
+            virtual_tool_pos,
+            virtual_tool_rot,
+            args.tool_frame_local_offset,
+        )
 
     ee_pose = _try_curobo_ee(q_curobo)
     _print_curobo_comparison(ee_pose, model, data, sites, bodies)
