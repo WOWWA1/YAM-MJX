@@ -35,7 +35,98 @@ That environment is useful for scripted control, diagnostics, rendering, and
 eventually a more integrated observe-plan-execute loop. It does not require
 training a policy.
 
-## Requirements
+## Fresh Linux/NVIDIA Setup
+
+For a fresh Linux/NVIDIA machine or pod, use the top-level bootstrap scripts.
+This is the preferred setup path. It follows TiPToP's documented install flow
+for TiPToP/cuRobo/cuTAMP and TiPToP's M2T2 fork, then applies the minimal YAM
+bridge patches from this repo.
+
+### 1. Clone and bootstrap
+
+```bash
+git clone https://github.com/WOWWA1/YAM-MJX.git
+cd YAM-MJX
+
+# Recommended on RunPod/root containers so large envs avoid slower or
+# quota-limited network volumes. If /opt is not writable, skip this line and
+# the scripts will use ~/.cache/yam-mjx.
+export YAM_LOCAL=/opt/yam-local
+
+scripts/bootstrap_yam_stack.sh
+source "$YAM_LOCAL/yam_env.sh"
+scripts/check_yam_stack.sh
+```
+
+The bootstrap uses:
+
+- TiPToP: `https://github.com/tiptop-robot/tiptop.git`
+- M2T2: `https://github.com/williamshen-nz/M2T2.git`
+
+Heavy generated environments and caches are created under `$YAM_LOCAL` and
+symlinked into the repo before installation. This keeps paths stable and avoids
+the broken-environment problems that happen when pixi or Python environments
+are moved after creation.
+
+If `scripts/check_yam_stack.sh` passes, the machine is ready.
+
+### 2. Start M2T2
+
+Use a dedicated terminal and leave it running:
+
+```bash
+cd YAM-MJX
+source "$YAM_LOCAL/yam_env.sh"
+scripts/start_m2t2_server.sh
+```
+
+M2T2 serves grasp proposals over HTTP for TiPToP. If you want to check it from
+another terminal:
+
+```bash
+curl http://localhost:8123/health
+```
+
+### 3. Run the YAM simulation flow
+
+In a second terminal:
+
+```bash
+cd YAM-MJX
+source "$YAM_LOCAL/yam_env.sh"
+
+scripts/make_tiptop_h5.sh
+
+export GOOGLE_API_KEY="your-key-here"
+scripts/run_tiptop_yam.sh
+scripts/render_tiptop_latest.sh
+```
+
+The default rendered video is written to:
+
+```text
+/tmp/yam_tiptop_replay.mp4
+```
+
+If M2T2 weights fail to download because of Hugging Face/Git LFS limits, copy
+`m2t2.pth` into:
+
+```text
+$YAM_ROOT/external/M2T2/weights/m2t2.pth
+```
+
+If MuJoCo EGL fails with an `eglQueryString`/`NoneType` error, the machine is
+usually missing the system EGL library. On Ubuntu:
+
+```bash
+apt-get update
+apt-get install -y libegl1
+```
+
+## Manual Install Notes
+
+The scripted Linux setup above is preferred. The notes below are older manual
+commands kept for debugging individual pieces when the bootstrap is not enough.
 
 You need two environments:
 
@@ -68,7 +159,7 @@ export GOOGLE_API_KEY="your-key-here"
 
 Do not commit or paste API keys into files.
 
-## Terminal Layout
+## Manual Terminal Layout
 
 ### Terminal 1: M2T2 Server
 
